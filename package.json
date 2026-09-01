@@ -1,0 +1,22 @@
+{
+  "name": "quakeclone",
+  "version": "1.0.0",
+  "description": "Quake-style real-time multiplayer zombie arena — authoritative Node.js + Socket.io server, Three.js client, Web Audio synth SFX. Self-hosted behind NGINX Proxy Manager Plus.",
+  "main": "server.js",
+  "private": true,
+  "scripts": {
+    "start": "node server.js",
+    "smoke": "node scripts/smoke.js"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "express": "^4.21.2",
+    "socket.io": "^4.8.1",
+    "three": "^0.170.0"
+  },
+  "devDependencies": {
+    "socket.io-client": "^4.8.1"
+  }
+}

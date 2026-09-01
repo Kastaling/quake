@@ -1,0 +1,41 @@
+# ============================================================================
+#  Quake Arena // Zombie Siege — production compose layout for NPM+
+# ----------------------------------------------------------------------------
+#  NGINX Proxy Manager Plus sits in front of this service:
+#    * Create a proxy host (e.g. quake.yourdomain.lan) -> Forward to
+#      `localhost:3000` when NPM+ runs on the same machine as Docker, or
+#      `<server-ip>:3000` / container name when it lives elsewhere.
+#    * Enable WebSockets for the host (NPM+ passes the Upgrade header through).
+#    * X-Forwarded-For is handled server-side (`trust proxy` in server.js).
+#
+#  Port binding:
+#    - Default below binds to 127.0.0.1 only — NPM+ on this host can reach it,
+#      but the game port is not exposed directly to the LAN (proxy-only access).
+#    - If your NPM+ instance runs in its own Docker network, either join that
+#      network (see `networks` note) or change the bind address to 0.0.0.0.
+# ============================================================================
+
+services:
+  quakeclone:
+    build: .
+    image: quakeclone:latest
+    container_name: quakeclone
+    restart: unless-stopped
+    environment:
+      - NODE_ENV=production
+      - PORT=3000
+      - HOST=0.0.0.0
+    ports:
+      # proxy-only binding (NPM+ on the same host forwards to localhost:3000)
+      - "127.0.0.1:3000:3000"
+      # If NPM+ runs in a separate Docker network, remove the line above and use:
+      # - "3000:3000"
+    networks:
+      - quake
+
+networks:
+  quake:
+    name: quakeclone-net
+    driver: bridge
+    # If you run NPM+ via docker-compose too, replace with `external: true` and
+    # the name of NPM+'s network so both containers share it.
