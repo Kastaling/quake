@@ -54,6 +54,9 @@ const el = {
   deathCount: document.getElementById('deathCount'),
   lockOverlay: document.getElementById('lockOverlay'),
   netStatus: document.getElementById('netStatus'),
+  chatBox: document.getElementById('chat-box'),
+  chatLog: document.getElementById('chat-log'),
+  chatInput: document.getElementById('chat-input'),
 };
 
 const WEAPON_SHORT = ['AR', 'SGT', 'SSG', 'GL', 'RL', 'LG', 'RG'];
@@ -102,6 +105,7 @@ let yaw = 0, pitch = 0;
 let firing = false;
 let weaponIdx = 0;
 let locked = false;
+let chatOpen = false;          // in-game chat overlay state (session-only, never persisted)
 let selfSpeed = 0;             // smoothed horizontal speed estimate (u/s) from snapshots
 
 /* --- effects state ----------------------------------------------------------- */
@@ -1144,7 +1148,59 @@ function switchWeapon(i) {
   buildViewmodel(weaponIdx);
 }
 
+/* --- in-game chat overlay (session-only, no persistence) ---------------------- */
+// T / Enter release pointer control and slide the input up. Enter inside the
+// input emits 'chatMessage' to the server (which relays it to every client) and
+// re-engages pointer lock. Received messages are appended to #chat-log in this
+// client's DOM only — nothing is stored anywhere, so history dies with the tab.
+
+function openChat() {
+  if (chatOpen) return;
+  chatOpen = true;
+  for (const k in keys) keys[k] = false; // no stuck movement while typing
+  firing = false;
+  el.chatBox.classList.add('open');      // slides #chat-input up
+  document.exitPointerLock();            // release pointer control
+  el.chatInput.value = '';
+  el.chatInput.focus();
+}
+
+function closeChat() {
+  if (!chatOpen) return;
+  chatOpen = false;
+  el.chatBox.classList.remove('open');   // slides #chat-input back down
+  el.chatInput.value = '';
+  el.chatInput.blur();
+  // Re-engage pointer lock. Some browsers throttle re-lock right after a
+  // programmatic exit — if the request is denied, the click-to-enter menu
+  // overlay takes over (see pointerlockerror / pointerlockchange below).
+  let req;
+  try { req = canvas.requestPointerLock(); } catch (_) { /* fall back to menu */ }
+  if (req && typeof req.then === 'function') req.catch(() => {});
+}
+
+/** Append one chat line to the session-only log (textContent — no HTML injection). */
+function appendChatLine(name, text) {
+  const line = document.createElement('div');
+  line.className = 'chat-line';
+  const who = document.createElement('b');
+  who.textContent = name;
+  line.appendChild(who);
+  line.appendChild(document.createTextNode(`: ${text}`));
+  el.chatLog.appendChild(line);
+  while (el.chatLog.children.length > 30) el.chatLog.removeChild(el.chatLog.firstChild); // cap the log
+  el.chatLog.scrollTop = el.chatLog.scrollHeight; // keep the newest line visible
+}
+
 document.addEventListener('keydown', (e) => {
+  // Chat overlay open: every key goes to the input, never to the game.
+  if (chatOpen) {
+    if (e.code === 'Escape') closeChat(); // works even if focus slipped off the input
+    return;
+  }
+  // T / Enter while in-game: release pointer control and slide up the chat input
+  if ((e.code === 'KeyT' || e.code === 'Enter') && locked) { openChat(); return; }
+
   keys[e.code] = true;
   if (e.code === 'Space') e.preventDefault();
   const digit = ['Digit1', 'Digit2', 'Digit3', 'Digit4', 'Digit5', 'Digit6', 'Digit7']
@@ -1152,6 +1208,18 @@ document.addEventListener('keydown', (e) => {
   if (digit >= 0) switchWeapon(digit);
 });
 document.addEventListener('keyup', (e) => { keys[e.code] = false; });
+
+el.chatInput.addEventListener('keydown', (e) => {
+  if (e.code === 'Enter') {
+    e.preventDefault();
+    const text = el.chatInput.value.trim();
+    if (text && socket && socket.connected) socket.emit('chatMessage', text);
+    closeChat(); // re-engages pointer lock
+  } else if (e.code === 'Escape') {
+    e.preventDefault();
+    closeChat();
+  }
+});
 
 canvas.addEventListener('mousedown', (e) => {
   if (!locked) return;
@@ -1177,7 +1245,9 @@ document.addEventListener('mousemove', (e) => {
 
 document.addEventListener('pointerlockchange', () => {
   locked = document.pointerLockElement === canvas;
-  el.lockOverlay.style.display = locked ? 'none' : 'flex';
+  // The menu overlay stays hidden while the chat overlay is open: we exit pointer
+  // lock to type, but that must not flash the "click to enter" screen.
+  el.lockOverlay.style.display = (locked || chatOpen) ? 'none' : 'flex';
   if (locked) {
     // Chromium/Vivaldi viewport bug: the window can report a stale size right
     // after pointer lock is acquired — defer the resize resync to the next
@@ -1190,6 +1260,12 @@ document.addEventListener('pointerlockchange', () => {
   // camera.rotation are written exclusively by the frame loop, and with
   // matrixAutoUpdate enabled three.js recomposes both matrices from
   // position/quaternion/scale every render — there is no stray offset to clear.
+});
+
+document.addEventListener('pointerlockerror', () => {
+  // Re-lock was denied (e.g. browser throttle right after a programmatic exit):
+  // fall back to the click-to-enter menu so the player can re-engage manually.
+  if (!locked && !chatOpen) el.lockOverlay.style.display = 'flex';
 });
 
 el.lockOverlay.addEventListener('click', () => {
@@ -1284,6 +1360,15 @@ function connect() {
   socket.on('state', (data) => pushSnapshot(data));
 
   socket.on('event', onEvent);
+
+  // Session-only chat relay: append to this client's log only — no persistence,
+  // the history lives in #chat-log for the duration of this session and nothing
+  // more.
+  socket.on('chatMessage', (data) => {
+    const name = data && typeof data.name === 'string' ? data.name : '?';
+    const text = data && typeof data.text === 'string' ? data.text.trim() : '';
+    if (text) appendChatLine(name, text);
+  });
 }
 
 function onEvent(e) {

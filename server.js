@@ -770,7 +770,12 @@ function respawn(p) {
 const app = express();
 app.disable('x-powered-by');
 app.set('trust proxy', true);   // NPM+ reverse proxy: honor X-Forwarded-For / real IPs
-app.use(express.static(path.join(__dirname, 'public')));
+// No-cache for all client assets: browsers/proxies must always pull fresh scripts
+app.use(express.static(path.join(__dirname, 'public'), {
+  setHeaders(res) {
+    res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
+  },
+}));
 // three.js is served straight from node_modules (no build step) for the import map
 app.use('/vendor', express.static(path.join(__dirname, 'node_modules'), { maxAge: '7d' }));
 
@@ -852,6 +857,16 @@ io.on('connection', (socket) => {
     if (!player) return;
     const w = Math.floor(Number(i));
     if (w >= 0 && w < WEAPONS.length) player.weapon = w;
+  });
+
+  // Session-only chat relay: sanitize the incoming text and broadcast it to every
+  // connected client. Nothing is persisted or stored on the server — message
+  // history lives only in each client's DOM for the duration of its session.
+  socket.on('chatMessage', (data) => {
+    const raw = typeof data === 'string' ? data : (data && typeof data.text === 'string') ? data.text : '';
+    const text = raw.replace(/[\u0000-\u001f\u007f]/g, '').trim().slice(0, 120);
+    if (!text) return;
+    io.emit('chatMessage', { name: player ? player.name : 'GUEST', text });
   });
 
   socket.on('disconnect', () => {
