@@ -6,8 +6,9 @@
  *   - base walk speed recovers to exactly MAXWALK on ground (friction-first order)
  *   - friction stop time from full speed
  *   - jump apex + airtime window
- *   - classic air strafing (hold strafe + turn mouse, bhop chain) builds
- *     horizontal speed with NO hard cap (old 34 u/s ceiling is gone)
+ *   - classic air strafing (hold strafe + turn mouse, bhop chain) still builds
+ *     horizontal speed with no hard cap, but the toned-down ACCEL_AIR / MAXWALK
+ *     keep the plateau at roughly a third of the old build-up (~23 u/s peak)
  *   - blast impulses are pure radial relative to player position: angled
  *     up+forward for a moving shooter (proper rocket jump), and purely
  *     horizontal for a side blast (no vertical pencil bias)
@@ -88,8 +89,8 @@ const hspeed = (p) => Math.hypot(p.vx, p.vz);
   while (!p.onGround && air < 60 * 10) { if (p.y > apex) apex = p.y; step(p, 1); air++; }
   const h = apex - api.groundHeightAt(p.x, p.z);
   const expectH = (api.JUMP_VEL * api.JUMP_VEL) / (2 * api.GRAVITY);
-  check('jump: apex ~4 u', Math.abs(h - expectH) < 0.35, `apex=${h.toFixed(2)}u (expect ${expectH.toFixed(2)})`);
-  check('jump: airtime ~1 s strafe window', air / 60 >= 0.8 && air / 60 <= 1.2, `${(air / 60).toFixed(2)}s`);
+  check('jump: apex ~1.6 u', Math.abs(h - expectH) < 0.35, `apex=${h.toFixed(2)}u (expect ${expectH.toFixed(2)})`);
+  check('jump: airtime ~0.6 s strafe window', air / 60 >= 0.45 && air / 60 <= 0.7, `${(air / 60).toFixed(2)}s`);
 }
 
 /* --- 4. classic air strafing (turn + strafe bhop chain) ------------------------ */
@@ -119,8 +120,9 @@ const hspeed = (p) => Math.hypot(p.vx, p.vz);
   }
 
   const spin = strafeRun(1, 0);          // hold D, turn one direction continuously
-  check('air strafe (spin): exceeds the old hard cap of 34 u/s (no cap now)', spin.peak > 34, `peak=${spin.peak.toFixed(1)} u/s`);
-  check('air strafe (spin): sustained speed build-up over 12 s', spin.end > api.MAXWALK + 8, `end=${spin.end.toFixed(1)} vs base ${api.MAXWALK}`);
+  check('air strafe (spin): builds above base speed but stays in the toned-down band (~1/3 of old ~74 u/s plateau)',
+    spin.peak > api.MAXWALK + 5 && spin.peak < 30, `peak=${spin.peak.toFixed(1)} u/s`);
+  check('air strafe (spin): sustained speed build-up over 12 s', spin.end > api.MAXWALK, `end=${spin.end.toFixed(1)} vs base ${api.MAXWALK}`);
 
   const pump = strafeRun(-1, 40);        // hold A, flip turn direction every ~0.67 s
   check('air strafe (pump): also builds speed', pump.peak > api.MAXWALK + 5 && pump.end > api.MAXWALK + 4,

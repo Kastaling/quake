@@ -52,13 +52,12 @@ const RAMP_W = 5;                     // ramp half-width
 
 /* --- Quake/Source-style movement physics (overhauled) ----------------------- */
 const GRAVITY = 38;                   // units/s^2 (raised with the jump for a snappier arc)
-const JUMP_VEL = 22;                  // overhauled jump impulse -> ~6.4 u apex, ~1.1 s airtime strafe window
-const MAXWALK = 20;                   // base speed: velocity component cap along facing dir (up from 13)
+const JUMP_VEL = 11;                  // halved jump impulse -> ~1.6 u apex, ~0.58 s airtime strafe window
+const MAXWALK = 13;                   // base speed: velocity component cap along facing dir (reduced from 20)
 const ACCEL_GROUND = 200;             // ground acceleration (overcomes friction -> recovers to MAXWALK fast)
-const ACCEL_AIR = 200;                // air acceleration: strong enough that turning while
-                                       // strafing keeps re-opening the facing-component gate, so
-                                       // continuous mouse turns build horizontal momentum (classic
-                                       // Source/Quake air strafe). Skill-scaled plateau ~40-90 u/s, no cap.
+const ACCEL_AIR = 40;                 // air acceleration: cut so turning while strafing still builds
+                                       // momentum, but the plateau lands at roughly a third of the old
+                                       // build-up (~23 u/s peak vs ~74 before). No hard cap.
 const FRICTION = 6;                   // ground friction coefficient (air has none -> bhop)
 const STOP_SPEED = 1.0;               // below this, ground speed is zeroed when no input held
 const SANITY_MAX = 160;               // numerical safety net ONLY — not a gameplay cap (anti-tunneling:
@@ -226,9 +225,8 @@ function clampToArena(ent) {
  *    component, never to total speed. Holding A/D while turning the mouse keeps
  *    that component below MAXWALK, so every tick adds more velocity -> classic
  *    horizontal speed build-up with NO hard cap (bunny hop chains).
- *  - Jump: impulse preserves all horizontal momentum; the overhauled JUMP_VEL
- *    (22) with raised gravity gives a ~6 u apex and a ~1.1 s airtime window for
- *    strafing each hop.
+ *  - Jump: impulse preserves all horizontal momentum; the halved JUMP_VEL
+ *    (11) gives a ~1.6 u apex and a ~0.58 s airtime window for strafing each hop.
  */
 function updatePlayerPhysics(p, dt) {
   const inp = p.input;
