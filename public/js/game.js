@@ -25,6 +25,11 @@
  *    viewmodel bob intensity and the HUD SPEED readout (so air strafe / bhop
  *    build-up is visible).
  *  - Audio triggers into sounds.js (positional Web Audio synth).
+ *  - Weapon VFX: the Lightning Gun renders a continuous cyan shaft from the
+ *    viewmodel muzzle to its hit point (or max range) while firing, with
+ *    per-frame vertex jitter and opacity flicker that vanish the instant
+ *    firing stops. Railgun hitlines persist as core+halo beam meshes that fade
+ *    smoothly over 1.0 s before being removed from the scene.
  * ============================================================================
  */
 
@@ -105,6 +110,12 @@ let shakeT = 0, shakeMag = 0;
 const tracers = [];            // { line, life, maxLife }
 const booms = [];              // { mesh, light, t, dur, r }
 const particles = [];          // { mesh, vx, vy, vz, life, maxLife }
+const railBeams = [];          // { core, halo, t, dur } — persistent railgun beams fading over 1.0 s
+let lgBeam = null;             // { outer, inner } — continuous local Lightning Gun shaft while firing
+
+// Weapon VFX tuning (mirror the server weapon definitions)
+const LG_RANGE = 90;           // Lightning Gun max range (server: range 90)
+const RAIL_TRAIL_LIFE = 1.0;   // seconds a railgun beam persists before removal
 
 /* ============================== THREE SETUP ================================ */
 
@@ -551,6 +562,36 @@ function estimateSelfSpeed() {
 
 /* ============================== EFFECTS ==================================== */
 
+/* --- Railgun trail: persistent core+halo beam fading over RAIL_TRAIL_LIFE ---- */
+const _railDir = new THREE.Vector3();
+const _railMid = new THREE.Vector3();
+const _railUp = new THREE.Vector3(0, 1, 0);
+
+/**
+ * Persistent railgun hitline: a bright core cylinder plus a wider additive halo
+ * from muzzle to end point. It stays in the scene for RAIL_TRAIL_LIFE seconds,
+ * fading smoothly (cosine ease-out) before removal — see updateEffects().
+ */
+function spawnRailBeam(e) {
+  const a = new THREE.Vector3(e.x, e.y, e.z);
+  const b = new THREE.Vector3(e.hx, e.hy, e.hz);
+  const len = Math.max(0.5, a.distanceTo(b));
+  _railDir.copy(b).sub(a).normalize();
+  _railMid.copy(a).add(b).multiplyScalar(0.5);
+
+  const mkCyl = (r, color, opacity) => {
+    const m = new THREE.Mesh(
+      new THREE.CylinderGeometry(r, r, len, 8, 1, true),
+      new THREE.MeshBasicMaterial({ color, transparent: true, opacity, blending: THREE.AdditiveBlending, depthWrite: false }));
+    m.quaternion.setFromUnitVectors(_railUp, _railDir); // cylinder axis (+Y) -> beam direction
+    m.position.copy(_railMid);
+    scene.add(m);
+    return m;
+  };
+
+  railBeams.push({ core: mkCyl(0.05, 0xffd9ff, 1), halo: mkCyl(0.14, 0xff4df0, 0.5), t: 0, dur: RAIL_TRAIL_LIFE });
+}
+
 function spawnTracer(e) {
   const isRail = e.w === 'railgun';
   const isLightning = e.w === 'lightning';
@@ -568,15 +609,21 @@ function spawnTracer(e) {
         e.y + (e.hy - e.y) * f + jy,
         e.z + (e.hz - e.z) * f + (i === 0 || i === segs ? 0 : (Math.random() - 0.5) * 0.7)));
     }
-  } else {
+  } else if (!isRail) {
     pts = [new THREE.Vector3(e.x, e.y, e.z), new THREE.Vector3(e.hx, e.hy, e.hz)];
   }
 
-  const geo = new THREE.BufferGeometry().setFromPoints(pts);
   const color = isRail ? 0xff4df0 : isLightning ? 0x7be8ff : (e.w === 'shotgun' || e.w === 'super') ? 0xffd27b : 0xfff6c8;
-  const line = new THREE.Line(geo, new THREE.LineBasicMaterial({ color, transparent: true, opacity: 1 }));
-  scene.add(line);
-  tracers.push({ line, life: isRail ? 0.14 : 0.07, maxLife: isRail ? 0.14 : 0.07 });
+
+  if (isRail) {
+    // persistent beam mesh that fades over RAIL_TRAIL_LIFE — see updateEffects()
+    spawnRailBeam(e);
+  } else {
+    const geo = new THREE.BufferGeometry().setFromPoints(pts);
+    const line = new THREE.Line(geo, new THREE.LineBasicMaterial({ color, transparent: true, opacity: 1 }));
+    scene.add(line);
+    tracers.push({ line, life: 0.07, maxLife: 0.07 });
+  }
 
   // impact spark at the end point
   const spark = new THREE.Mesh(new THREE.SphereGeometry(0.12, 8, 6),
@@ -584,6 +631,174 @@ function spawnTracer(e) {
   spark.position.set(e.hx, e.hy, e.hz);
   scene.add(spark);
   booms.push({ mesh: spark, light: null, t: 0, dur: 0.12, r: 0.5, grow: true });
+}
+
+/* --- Lightning Gun continuous beam (local player only) ------------------------ */
+// While holding fire with the LG, a persistent cyan shaft runs from the viewmodel
+// muzzle to the first thing in its path — solids, arena walls, zombies or remote
+// players (mirroring the server's raycastAll), otherwise max range. Intermediate
+// vertices are re-jittered every frame and the opacity flickers; the beam is
+// removed on the very next frame firing stops (mouse up, weapon switch, pointer
+// unlock, death or empty cells).
+const LG_BEAM_SEGS = 27;       // jitter subdivisions between muzzle and end point
+const _lgMuzzle = new THREE.Vector3();
+const _lgDir = new THREE.Vector3();
+const _lgEnd = new THREE.Vector3();
+const _lgU = new THREE.Vector3();
+const _lgV = new THREE.Vector3();
+const _lgUp = new THREE.Vector3(0, 1, 0);
+
+/** World-space position of the LG viewmodel muzzle (prong tips), bob/recoil included. */
+function lgMuzzlePoint(out) {
+  if (vmGun) {
+    camera.updateMatrixWorld(true); // fresh camera + viewmodel chain for this frame
+    out.set(0, 0.04, -0.6).applyMatrix4(vmGun.matrixWorld);
+    return out;
+  }
+  return camera.localToWorld(out.set(0, -0.3, -1));
+}
+
+/** Aim direction from the local mouse-look angles (matches server aimDir). */
+function lgAimDir(out) {
+  const cp = Math.cos(pitch), sp = Math.sin(pitch);
+  return out.set(-Math.sin(yaw) * cp, sp, -Math.cos(yaw) * cp).normalize();
+}
+
+/** Ray vs axis-aligned box (slab test). Returns entry t > 0, or null on miss / origin inside. */
+function lgRayBox(ox, oy, oz, dx, dy, dz, minX, maxX, minY, maxY, minZ, maxZ) {
+  let tmin = -Infinity, tmax = Infinity;
+  let t1, t2;
+  if (Math.abs(dx) < 1e-9) { if (ox < minX || ox > maxX) return null; }
+  else { t1 = (minX - ox) / dx; t2 = (maxX - ox) / dx; if (t1 > t2) { const s = t1; t1 = t2; t2 = s; } tmin = Math.max(tmin, t1); tmax = Math.min(tmax, t2); }
+  if (Math.abs(dy) < 1e-9) { if (oy < minY || oy > maxY) return null; }
+  else { t1 = (minY - oy) / dy; t2 = (maxY - oy) / dy; if (t1 > t2) { const s = t1; t1 = t2; t2 = s; } tmin = Math.max(tmin, t1); tmax = Math.min(tmax, t2); }
+  if (Math.abs(dz) < 1e-9) { if (oz < minZ || oz > maxZ) return null; }
+  else { t1 = (minZ - oz) / dz; t2 = (maxZ - oz) / dz; if (t1 > t2) { const s = t1; t1 = t2; t2 = s; } tmin = Math.max(tmin, t1); tmax = Math.min(tmax, t2); }
+  if (tmin > tmax) return null;
+  if (tmin <= 0) return null;   // origin inside the box: no surface in front to stop on
+  return tmin;
+}
+
+/** Ray vs sphere. Returns entry t >= 0, or null on miss. */
+function lgRaySphere(ox, oy, oz, dx, dy, dz, cx, cy, cz, r) {
+  const lx = cx - ox, ly = cy - oy, lz = cz - oz;
+  const tca = lx * dx + ly * dy + lz * dz;      // dir is unit length
+  if (tca < 0) return null;
+  const d2 = lx * lx + ly * ly + lz * lz - tca * tca;
+  if (d2 > r * r) return null;
+  const thc = Math.sqrt(r * r - d2);
+  const t = tca - thc;
+  return t > 0 ? t : 0.3;                       // origin inside: stop just in front of the muzzle
+}
+
+/** First hit along the LG shaft (solids, arena walls, zombies, remote players) or max range. */
+function lgRayEnd(origin, dir, out) {
+  let tBest = LG_RANGE;
+  const H = worldMap ? worldMap.arenaHalf : 40;
+
+  if (worldMap) {
+    for (const s of worldMap.solids) {          // [minX, maxX, minZ, maxZ, top]
+      const t = lgRayBox(origin.x, origin.y, origin.z, dir.x, dir.y, dir.z, s[0], s[1], 0, s[4], s[2], s[3]);
+      if (t != null && t < tBest) tBest = t;
+    }
+    // perimeter walls (visual boxes from buildWorld: 0.8 thick, 3.4 tall at ±H)
+    const e = 0.4;
+    for (const w of [
+      [-(H + e), H + e, H - e, H + e],          // north
+      [-(H + e), H + e, -(H + e), -(H - e)],    // south
+      [H - e, H + e, -(H + e), H + e],          // east
+      [-(H + e), -(H - e), -(H + e), H + e],    // west
+    ]) {
+      const t = lgRayBox(origin.x, origin.y, origin.z, dir.x, dir.y, dir.z, w[0], w[1], 0, 3.4, w[2], w[3]);
+      if (t != null && t < tBest) tBest = t;
+    }
+  }
+
+  // zombies (approximate hit spheres matching the server's radii/scales)
+  for (const z of zombies3d.values()) {
+    const s = ZOMBIE_STYLE[z.typeIdx] ? ZOMBIE_STYLE[z.typeIdx].scale : 1;
+    const t = lgRaySphere(origin.x, origin.y, origin.z, dir.x, dir.y, dir.z,
+      z.group.position.x, z.group.position.y + 0.85 * s, z.group.position.z, 0.62 * s);
+    if (t != null && t < tBest) tBest = t;
+  }
+
+  // remote players (the same spheres the server raycasts against)
+  for (const p of players3d.values()) {
+    const t = lgRaySphere(origin.x, origin.y, origin.z, dir.x, dir.y, dir.z,
+      p.group.position.x, p.group.position.y + 0.9, p.group.position.z, 0.62);
+    if (t != null && t < tBest) tBest = t;
+  }
+
+  return out.copy(origin).addScaledVector(dir, tBest);
+}
+
+function createLgBeam() {
+  const mkLine = (color, opacity) => {
+    const geo = new THREE.BufferGeometry();
+    geo.setAttribute('position', new THREE.BufferAttribute(new Float32Array((LG_BEAM_SEGS + 1) * 3), 3));
+    const line = new THREE.Line(geo, new THREE.LineBasicMaterial({
+      color, transparent: true, opacity, blending: THREE.AdditiveBlending, depthWrite: false,
+    }));
+    scene.add(line);
+    return line;
+  };
+  lgBeam = { outer: mkLine(0x7be8ff, 0.9), inner: mkLine(0xeaffff, 1) }; // cyan shaft + white-hot core
+}
+
+function removeLgBeam() {
+  if (!lgBeam) return;
+  scene.remove(lgBeam.outer);
+  scene.remove(lgBeam.inner);
+  lgBeam.outer.geometry.dispose();
+  lgBeam.outer.material.dispose();
+  lgBeam.inner.geometry.dispose();
+  lgBeam.inner.material.dispose();
+  lgBeam = null;
+}
+
+/** Per-frame update of the continuous LG shaft: re-aim, re-jitter vertices, flicker opacity. */
+function updateLgBeam() {
+  const self = (me != null && latestState) ? latestState.p.find((p) => p[0] === me) : null;
+  // weaponIdx 5 = Lightning Gun; self[14] = cells ammo (server snapshot layout)
+  const wantBeam = !!(firing && locked && weaponIdx === 5 && self && self[8] !== 1 && self[14] > 0);
+
+  if (!wantBeam) { removeLgBeam(); return; }   // removed immediately when firing stops
+  if (!lgBeam) createLgBeam();
+
+  lgMuzzlePoint(_lgMuzzle);
+  lgAimDir(_lgDir);
+  lgRayEnd(_lgMuzzle, _lgDir, _lgEnd);
+
+  // two orthonormal vectors perpendicular to the shaft for the jitter offsets
+  if (Math.abs(_lgDir.y) < 0.95) _lgU.crossVectors(_lgDir, _lgUp).normalize();
+  else _lgU.set(1, 0, 0);
+  _lgV.crossVectors(_lgDir, _lgU).normalize();
+
+  const writePts = (line, amp) => {
+    const attr = line.geometry.attributes.position;
+    for (let i = 0; i <= LG_BEAM_SEGS; i++) {
+      const f = i / LG_BEAM_SEGS;
+      let x = _lgMuzzle.x + (_lgEnd.x - _lgMuzzle.x) * f;
+      let y = _lgMuzzle.y + (_lgEnd.y - _lgMuzzle.y) * f;
+      let z = _lgMuzzle.z + (_lgEnd.z - _lgMuzzle.z) * f;
+      if (i > 0 && i < LG_BEAM_SEGS) {
+        // sine envelope pins both endpoints so the shaft stays anchored to muzzle and target
+        const env = Math.sin(Math.PI * f);
+        x += ((Math.random() - 0.5) * _lgU.x + (Math.random() - 0.5) * _lgV.x) * amp * env;
+        y += ((Math.random() - 0.5) * _lgU.y + (Math.random() - 0.5) * _lgV.y) * amp * env;
+        z += ((Math.random() - 0.5) * _lgU.z + (Math.random() - 0.5) * _lgV.z) * amp * env;
+      }
+      attr.setXYZ(i, x, y, z);
+    }
+    attr.needsUpdate = true;
+  };
+
+  writePts(lgBeam.outer, 0.42);   // wide cyan arc with full jitter
+  writePts(lgBeam.inner, 0.16);   // tight white-hot core
+
+  // subtle opacity flicker while active (gone with the beam when firing stops)
+  lgBeam.outer.material.opacity = 0.7 + Math.random() * 0.3;
+  lgBeam.inner.material.opacity = 0.85 + Math.random() * 0.15;
 }
 
 function spawnExplosionVisual(e) {
@@ -645,6 +860,26 @@ function spawnPoof(x, y, z, color) {
 }
 
 function updateEffects(dt) {
+  // railgun beams: smooth cosine ease-out fade over their full lifetime, then removal
+  for (let i = railBeams.length - 1; i >= 0; i--) {
+    const rb = railBeams[i];
+    rb.t += dt;
+    const f = Math.min(1, rb.t / rb.dur);
+    if (f >= 1) {
+      scene.remove(rb.core);
+      scene.remove(rb.halo);
+      rb.core.geometry.dispose();
+      rb.core.material.dispose();
+      rb.halo.geometry.dispose();
+      rb.halo.material.dispose();
+      railBeams.splice(i, 1);
+      continue;
+    }
+    const k = 0.5 * (1 + Math.cos(Math.PI * f)); // 1 -> 0 with zero slope at both ends
+    rb.core.material.opacity = k;
+    rb.halo.material.opacity = 0.5 * k;
+  }
+
   for (let i = tracers.length - 1; i >= 0; i--) {
     const t = tracers[i];
     t.life -= dt;
@@ -1053,11 +1288,16 @@ function connect() {
 
 function onEvent(e) {
   switch (e.t) {
-    case 'shot':
-      SFX.playShot(e.w, [e.x, e.y, e.z], e.s === me);
-      if (e.s === me) muzzleFlash();
-      else spawnTracer(e);
+    case 'shot': {
+      const mine = e.s === me;
+      SFX.playShot(e.w, [e.x, e.y, e.z], mine);
+      if (mine) muzzleFlash();
+      // Local Lightning Gun shots are rendered as the continuous flickering beam
+      // (updateLgBeam), so their per-tick events skip the short jagged tracer.
+      // Railgun shots — local or remote — get the persistent 1 s fading beam.
+      if (!mine || e.w === 'railgun') spawnTracer(e);
       break;
+    }
     case 'explosion':
       SFX.playExplosion([e.x, e.y, e.z]);
       spawnExplosionVisual(e);
@@ -1328,6 +1568,7 @@ function animate() {
   }
 
   updateEntities(now, dt);
+  updateLgBeam(); // continuous local LG shaft (re-aims + re-jitters every frame)
   updateEffects(dt);
   updateHUD();
 
