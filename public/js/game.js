@@ -5,18 +5,23 @@
  *  - First-person renderer: retro grid arena, cover blocks, ramps, central
  *    platform with the two interactive buttons (overhead cooldown meters),
  *    pickups, remote players and zombies.
- *  - Interpolation / extrapolation: entity positions are sampled from a ring
- *    buffer of server snapshots at a render delay (120 ms for others, ~45 ms
- *    for self) with capped velocity extrapolation when data runs out.
+ *  - Interpolation / extrapolation: remote entity positions are sampled from a
+ *    ring buffer of server snapshots at a render delay (120 ms) with capped
+ *    velocity extrapolation when data runs out. The local player camera is fully
+ *    decoupled from the network: snapshot data only writes an internal target
+ *    object (targetPlayerPos), and the frame loop smoothly lerps the local feet
+ *    position toward it — no snapshot ever touches the camera transform directly.
  *  - Camera matrix sanitization: every snapshot value that feeds the camera is
  *    validated with Number.isFinite; NaN/undefined samples fall back to the last
  *    known-good coordinates (prevents the dark-screen bug from corrupt data).
+ *    The frame loop is the ONLY writer of camera.position / camera.rotation, and
+ *    camera.updateProjectionMatrix() runs only on window resize events.
  *  - Input listeners: pointer lock mouse look, WASD + jump, fire hold,
  *    weapon switching (keys 1-7 / wheel). Input is streamed to the server at
  *    display rate; the server stays authoritative.
- *  - Speed feedback: horizontal speed estimated from snapshot deltas drives a
- *    speed-based FOV kick, viewmodel bob intensity and the HUD SPEED readout
- *    (so air strafe / bhop build-up is visible).
+ *  - Speed feedback: horizontal speed estimated from snapshot deltas drives
+ *    viewmodel bob intensity and the HUD SPEED readout (so air strafe / bhop
+ *    build-up is visible).
  *  - Audio triggers into sounds.js (positional Web Audio synth).
  * ============================================================================
  */
@@ -65,14 +70,24 @@ let button3d = {};             // 'nuke' | 'inhibit' -> { group, fill, dome, lig
 const snapBuf = [];            // recent raw snapshots (for HUD / latest state)
 const entBuf = new Map();      // entity id -> [{t, v}] ring of samples
 const INTERP_DELAY = 0.12;     // render delay for remote entities
-const SELF_DELAY = 0.045;      // shorter delay for the local player
+const SELF_DELAY = 0.045;      // shorter delay for the local player (shake-distance sampling)
 const EYE_HEIGHT = 1.6;        // camera height above feet (mirrors server EYE)
 const BASE_FOV = 78;           // resting field of view
-const SPEED_FOV_MAX = 90;      // FOV at/above SPEED_FOV_REF horizontal speed
-const SPEED_FOV_REF = 90;      // u/s where the full FOV kick is reached (scaled to the
-                               // overhauled speed range: base walk 20, air-strafe up to ~90+)
+// Local-player smoothing: framerate-independent exponential lerp rate toward
+// targetPlayerPos (time constant ~33 ms), so the camera glides between the
+// 30 Hz snapshots instead of stepping at network rate.
+const SELF_SMOOTH_RATE = 30;
 
 let latestState = null;        // most recent snapshot (HUD source)
+
+/* --- local player network target / smoothed position ------------------------ */
+// Decoupling contract: socket snapshot data may ONLY write into `targetPlayerPos`
+// (validated in pushSnapshot). It never touches camera.position/rotation or any
+// matrix. The rAF frame loop is the single writer of the camera transform: each
+// frame it lerps `localPos` toward `targetPlayerPos`, then syncs
+//   camera.position.set(localPos.x, localPos.y + EYE_HEIGHT, localPos.z)
+const targetPlayerPos = { x: 0, y: 0, z: 24 }; // latest server feet position for me
+const localPos = new THREE.Vector3(0, 0, 24);   // smoothed feet position (frame-loop owned)
 
 /* --- input ------------------------------------------------------------------ */
 const keys = Object.create(null);
@@ -99,10 +114,10 @@ const scene = new THREE.Scene();
 scene.background = new THREE.Color(0x05070d);
 scene.fog = new THREE.Fog(0x05070d, 35, 100);
 
-const camera = new THREE.PerspectiveCamera(78, window.innerWidth / window.innerHeight, 0.1, 250);
+const camera = new THREE.PerspectiveCamera(BASE_FOV, window.innerWidth / window.innerHeight, 0.1, 250);
 camera.rotation.order = 'YXZ';
-// start at eye height above open floor so pre-join frames never render inside the mesh
-camera.position.set(0, EYE_HEIGHT, 24);
+// (the pre-join pose is applied on the first frame — see animate() — so that the
+// rAF loop remains the only writer of camera.position)
 
 scene.add(new THREE.HemisphereLight(0x4a5f8a, 0x0c0f14, 0.95));
 const sun = new THREE.DirectionalLight(0xbfd4ff, 0.65);
@@ -442,6 +457,19 @@ function pushSnapshot(data) {
   }
   const live = new Set([...data.p, ...data.z, ...data.pr].map((e) => e[0]));
   for (const id of [...entBuf.keys()]) if (!live.has(id)) entBuf.delete(id);
+
+  // Local player network target — the ONLY thing snapshot data may write directly.
+  // Validated here so NaN/undefined can never reach the lerp or the camera in the
+  // frame loop; feet are clamped at the floor plane (y >= 0). No camera.position,
+  // no camera.rotation, no matrix updates happen anywhere in this path.
+  if (me != null) {
+    const self = data.p.find((e) => e[0] === me);
+    if (self && isFiniteNum(self[1]) && isFiniteNum(self[2]) && isFiniteNum(self[3])) {
+      targetPlayerPos.x = self[1];
+      targetPlayerPos.y = Math.max(self[2], 0);
+      targetPlayerPos.z = self[3];
+    }
+  }
 }
 
 /**
@@ -897,19 +925,13 @@ document.addEventListener('mousemove', (e) => {
 });
 
 document.addEventListener('pointerlockchange', () => {
-  const wasLocked = locked;
   locked = document.pointerLockElement === canvas;
   el.lockOverlay.style.display = locked ? 'none' : 'flex';
   if (!locked) firing = false;
-  else if (!wasLocked) {
-    // menu -> play transition: clear any stray offsets baked into the camera's
-    // local/world matrices so the first locked frame starts from a clean state.
-    // matrixAutoUpdate recomposes both from position/quaternion/scale on the next
-    // render, which is exactly the world-space pose we want (no parent chain).
-    camera.matrix.identity();
-    camera.matrixWorld.identity();
-    camera.updateProjectionMatrix();
-  }
+  // No manual matrix reset on the menu -> play transition: camera.position /
+  // camera.rotation are written exclusively by the frame loop, and with
+  // matrixAutoUpdate enabled three.js recomposes both matrices from
+  // position/quaternion/scale every render — there is no stray offset to clear.
 });
 
 el.lockOverlay.addEventListener('click', () => {
@@ -997,6 +1019,10 @@ function connect() {
     // face the arena center like the server spawn does
   });
 
+  // Snapshot data NEVER writes the camera transform here — no position/rotation,
+  // no matrix updates: it only feeds the interpolation buffers and the local
+  // player's network target (targetPlayerPos). The rAF frame loop owns the
+  // camera exclusively.
   socket.on('state', (data) => pushSnapshot(data));
 
   socket.on('event', onEvent);
@@ -1058,10 +1084,10 @@ function onEvent(e) {
 // Dark-screen guard. If a snapshot sample ever contains NaN/undefined (corrupt
 // or partial data), writing it into the camera transform puts NaN in the view
 // matrix and every subsequent frame renders as a dark screen. Every incoming
-// position / rotation value is validated with Number.isFinite before it touches
-// the camera; on bad input we hold the previous valid coordinates instead of
-// applying the corrupt sample, then refresh the projection matrix so the next
-// render uses a clean state.
+// position value is validated with Number.isFinite before it reaches
+// targetPlayerPos; on bad input we hold the previous valid coordinates instead
+// of applying the corrupt sample. The projection matrix is only ever refreshed
+// by the window resize handler — never from snapshot or event callbacks.
 
 const isFiniteNum = (v) => typeof v === 'number' && Number.isFinite(v);
 
@@ -1076,36 +1102,31 @@ const playerRotation = new THREE.Euler(0, 0, 0, 'YXZ');
 /* ============================== FRAME LOOP ================================= */
 
 let lastFrame = performance.now() / 1000;
+let cameraSeeded = false; // pre-join pose is applied on the first frame (the rAF loop owns all camera writes)
 
 function updateEntities(now, dt) {
   if (!latestState) return;
-  const rtOthers = now - INTERP_DELAY;
-  const rtSelf = now - SELF_DELAY;
+  const rtOthers = now - INTERP_DELAY; // remote entities only — the self camera uses the targetPlayerPos lerp
 
-  // --- self speed estimate (snapshot deltas) -> FOV kick + viewmodel bob ------
+  // --- self speed estimate (snapshot deltas) -> viewmodel bob + HUD readout ----
   const targetSpeed = selfDead() ? 0 : estimateSelfSpeed();
   selfSpeed += (targetSpeed - selfSpeed) * Math.min(1, dt * 6);
 
   // --- local player camera ---------------------------------------------------
-  // Explicit world-space sync, done right here in the frame loop: the camera is
-  // a DIRECT child of the root scene (never parented to any player mesh), so
-  // writing camera.position / camera.rotation below writes world space directly —
-  // there is no parent transform that could inject stray offsets. The local
-  // player's state comes from the interpolated snapshot sample
-  // `self` = [id, x, y(feet), z, ...], giving exactly:
-  //   camera.position.set(player.x, player.y + EYE_HEIGHT, player.z)
-  //   camera.rotation.copy(playerRotation)   (local mouse-look yaw/pitch here)
+  // The frame loop is the ONLY writer of camera.position / camera.rotation.
+  // Network snapshots never touch the camera directly: pushSnapshot() stores the
+  // latest server state for me in `targetPlayerPos`, and here we smoothly lerp
+  // our own feet position (`localPos`) toward that target, then sync the camera
+  // from it (world space — the camera is a direct child of the root scene, so no
+  // parent transform can inject stray offsets):
+  //   camera.position.set(localPos.x, localPos.y + EYE_HEIGHT, localPos.z)
   // The self body/head mesh is excluded from rendering entirely (see
-  // makePlayerMesh / remote loop), and feetY is clamped at the floor plane so
-  // extrapolation across a snapshot gap can never dip the camera below ground.
-  // Every value is validated with Number.isFinite before it touches the camera:
-  // NaN/undefined in a corrupt sample would poison the view matrix and render
-  // every subsequent frame as a dark screen, so bad input falls back to the last
-  // known-good coordinates (camLast).
-  const self = sampleAt(me, rtSelf, 5);
-  if (self && me != null) {
-    const dead = latestState.p.find((p) => p[0] === me);
-    if (!dead || dead[8] !== 1) {
+  // makePlayerMesh / remote loop). targetPlayerPos only ever holds finite values
+  // (validated in pushSnapshot), and the lerp below can therefore never produce
+  // NaN; the final guard is belt-and-braces for the dark-screen invariant.
+  if (me != null) {
+    const selfEntry = latestState.p.find((p) => p[0] === me);
+    if (!selfEntry || selfEntry[8] !== 1) {
       // screen shake offset
       let sx = 0, sy = 0;
       if (shakeMag > 0) {
@@ -1113,14 +1134,26 @@ function updateEntities(now, dt) {
         sy = (Math.random() - 0.5) * shakeMag;
       }
 
-      // explicit position copy in world space, per-component NaN validation:
-      //   camera.position.set(player.x, player.y + EYE_HEIGHT, player.z)
-      const okX = isFiniteNum(self[1]), okY = isFiniteNum(self[2]), okZ = isFiniteNum(self[3]);
-      const px = okX ? self[1] : camLast.x;
-      const py = Math.max(okY ? self[2] : 0, 0); // feet clamped at the floor plane
-      const pz = okZ ? self[3] : camLast.z;
-      camera.position.set(px, py + EYE_HEIGHT, pz);
-      camLast.x = px; camLast.y = py + EYE_HEIGHT; camLast.z = pz;
+      // smooth lerp toward the network target: framerate-independent exponential
+      // smoothing (k -> 1 as dt grows, so a dropped frame never overshoots).
+      const k = 1 - Math.exp(-SELF_SMOOTH_RATE * dt);
+      if (Math.abs(targetPlayerPos.x - localPos.x) +
+          Math.abs(targetPlayerPos.y - localPos.y) +
+          Math.abs(targetPlayerPos.z - localPos.z) > 8) {
+        // teleport detection (respawn / nuke wipe): snap instead of sliding across the map
+        localPos.set(targetPlayerPos.x, targetPlayerPos.y, targetPlayerPos.z);
+      } else {
+        localPos.x += (targetPlayerPos.x - localPos.x) * k;
+        localPos.y += (targetPlayerPos.y - localPos.y) * k;
+        localPos.z += (targetPlayerPos.z - localPos.z) * k;
+      }
+
+      // sync the camera from the smoothed feet position (feet are clamped at the
+      // floor plane in pushSnapshot, so y + EYE_HEIGHT can never dip below ground)
+      if (isFiniteNum(localPos.x) && isFiniteNum(localPos.y) && isFiniteNum(localPos.z)) {
+        camera.position.set(localPos.x, localPos.y + EYE_HEIGHT, localPos.z);
+        camLast.x = localPos.x; camLast.y = localPos.y + EYE_HEIGHT; camLast.z = localPos.z;
+      }
 
       // explicit orientation copy in world space (YXZ mouse-look order: pitch=x, yaw=y)
       const rp = isFiniteNum(pitch + sy) ? pitch + sy : camLast.pitch;
@@ -1129,17 +1162,7 @@ function updateEntities(now, dt) {
       camera.rotation.copy(playerRotation);
       if (isFiniteNum(pitch)) camLast.pitch = pitch;
       if (isFiniteNum(yaw)) camLast.yaw = yaw;
-
-      // corrupt sample: refresh the projection so the next render starts clean
-      if (!okX || !okY || !okZ) camera.updateProjectionMatrix();
     }
-  }
-
-  // speed-based FOV kick: widens with horizontal velocity for a sense of pace
-  const targetFov = BASE_FOV + (SPEED_FOV_MAX - BASE_FOV) * Math.min(1, selfSpeed / SPEED_FOV_REF);
-  if (Math.abs(camera.fov - targetFov) > 0.02) {
-    camera.fov += (targetFov - camera.fov) * Math.min(1, dt * 8);
-    camera.updateProjectionMatrix();
   }
 
   // --- remote players ----------------------------------------------------------
@@ -1267,6 +1290,14 @@ function animate() {
   const now = performance.now() / 1000;
   const dt = Math.min(0.05, now - lastFrame);
   lastFrame = now;
+
+  // one-time pre-join pose (applied here so the frame loop remains the ONLY
+  // writer of camera.position): eye height above open floor so early frames
+  // never render inside a mesh before any snapshot has arrived.
+  if (!cameraSeeded) {
+    cameraSeeded = true;
+    camera.position.set(localPos.x, localPos.y + EYE_HEIGHT, localPos.z);
+  }
 
   // stream input to the authoritative server at display rate (~60 Hz)
   if (socket && socket.connected && me != null) {
