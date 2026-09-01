@@ -443,13 +443,16 @@ function makeZombieMesh(typeIdx) {
   // depthWrite off + additive blending + high renderOrder so the glowing eyes
   // always draw above the head mesh (Metal/macOS WebGL).
   const eyeMat = new THREE.MeshBasicMaterial({ color: st.eye, transparent: true, depthWrite: false, blending: THREE.AdditiveBlending });
-  // Eyes sit on the front (-Z) face of the head box (half-depth 0.2*s): centers are
-  // pushed out by one radius so the glow rests cleanly on the surface instead of
-  // being buried inside the head volume.
+  // Eyes are children of the HEAD mesh (not the parent group) so they track head
+  // rotation as well as body yaw. Local origin is the head box center (half-depth
+  // 0.2*s); its front face is at local -Z, so centers sit one radius past it
+  // (-0.26 for s=1) and the glow rests on the surface instead of being buried in
+  // the head volume. y = +0.04*s keeps them at their former height (the head
+  // center sits at 1.62*s in group space).
   const eyeZ = -(0.2 * s + eyeR);
-  const e1 = new THREE.Mesh(eyeGeo, eyeMat); e1.position.set(-0.1 * s, 1.66 * s, eyeZ); e1.renderOrder = 999;
-  const e2 = new THREE.Mesh(eyeGeo, eyeMat); e2.position.set(0.1 * s, 1.66 * s, eyeZ); e2.renderOrder = 999;
-  group.add(e1, e2);
+  const e1 = new THREE.Mesh(eyeGeo, eyeMat); e1.position.set(-0.1 * s, 0.04 * s, eyeZ); e1.renderOrder = 999;
+  const e2 = new THREE.Mesh(eyeGeo, eyeMat); e2.position.set(0.1 * s, 0.04 * s, eyeZ); e2.renderOrder = 999;
+  head.add(e1, e2);
 
   // shambling arms reaching forward
   const armGeo = new THREE.BoxGeometry(0.14 * s, 0.5 * s, 0.14 * s);
@@ -1569,7 +1572,10 @@ function updateEntities(now, dt) {
     const s = sampleAt(e[0], rtOthers, 3);
     if (s && isFiniteNum(s[1]) && isFiniteNum(s[2]) && isFiniteNum(s[3])) {
       z.group.position.set(s[1], s[2], s[3]);
-      // face movement direction (from extrapolated velocity)
+      // Face the chase path toward the player (from extrapolated velocity). The
+      // model's front is local -Z (eyes/arms), and rotation.y = theta maps that to
+      // world (-sin(theta), -cos(theta)), so atan2(-dx, -dz) points it along the
+      // movement direction — no Math.PI flip needed.
       const b = entBuf.get(e[0]);
       if (b && b.length >= 2) {
         const dx = s[1] - b[b.length - 2].v[1];
