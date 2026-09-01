@@ -137,7 +137,9 @@ camera.rotation.order = 'YXZ';
 // rAF loop remains the only writer of camera.position)
 
 scene.add(new THREE.HemisphereLight(0x4a5f8a, 0x0c0f14, 0.95));
-const sun = new THREE.DirectionalLight(0xbfd4ff, 0.65);
+// Global ambient fill so environmental geometry stays evenly lit on Metal/macOS WebGL drivers.
+scene.add(new THREE.AmbientLight(0xffffff, 0.7));
+const sun = new THREE.DirectionalLight(0xbfd4ff, 0.8);
 sun.position.set(24, 42, 18);
 scene.add(sun);
 
@@ -437,9 +439,11 @@ function makeZombieMesh(typeIdx) {
   group.add(head);
 
   const eyeGeo = new THREE.SphereGeometry(0.055 * Math.max(s, 0.8), 8, 6);
-  const eyeMat = new THREE.MeshBasicMaterial({ color: st.eye });
-  const e1 = new THREE.Mesh(eyeGeo, eyeMat); e1.position.set(-0.1 * s, 1.66 * s, -0.21 * s);
-  const e2 = new THREE.Mesh(eyeGeo, eyeMat); e2.position.set(0.1 * s, 1.66 * s, -0.21 * s);
+  // depthWrite off + additive blending + high renderOrder so the glowing eyes
+  // always draw above the head mesh even when embedded in it (Metal/macOS WebGL).
+  const eyeMat = new THREE.MeshBasicMaterial({ color: st.eye, transparent: true, depthWrite: false, blending: THREE.AdditiveBlending });
+  const e1 = new THREE.Mesh(eyeGeo, eyeMat); e1.position.set(-0.1 * s, 1.66 * s, -0.21 * s); e1.renderOrder = 999;
+  const e2 = new THREE.Mesh(eyeGeo, eyeMat); e2.position.set(0.1 * s, 1.66 * s, -0.21 * s); e2.renderOrder = 999;
   group.add(e1, e2);
 
   // shambling arms reaching forward
@@ -1199,7 +1203,15 @@ document.addEventListener('keydown', (e) => {
     return;
   }
   // T / Enter while in-game: release pointer control and slide up the chat input
-  if ((e.code === 'KeyT' || e.code === 'Enter') && locked) { openChat(); return; }
+  if ((e.code === 'KeyT' || e.code === 'Enter') && locked) {
+    // Swallow the keypress before focusing #chat-input so the typed 't' never
+    // leaks into the field (Metal/macOS browsers deliver the character to the
+    // element that gains focus during this same event).
+    e.preventDefault();
+    el.chatInput.value = '';
+    openChat();
+    return;
+  }
 
   keys[e.code] = true;
   if (e.code === 'Space') e.preventDefault();
