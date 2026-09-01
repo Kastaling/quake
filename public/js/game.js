@@ -129,8 +129,11 @@ scene.add(camera);
 
 window.addEventListener('resize', () => {
   camera.aspect = window.innerWidth / window.innerHeight;
+  // explicit resync: force the drawing buffer + CSS size to the real viewport
+  // (Chromium/Vivaldi can report a stale viewport right after pointer lock)
+  renderer.setSize(window.innerWidth, window.innerHeight, true);
+  renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
   camera.updateProjectionMatrix();
-  renderer.setSize(window.innerWidth, window.innerHeight);
 });
 
 /* ============================== MATERIALS ================================== */
@@ -927,7 +930,13 @@ document.addEventListener('mousemove', (e) => {
 document.addEventListener('pointerlockchange', () => {
   locked = document.pointerLockElement === canvas;
   el.lockOverlay.style.display = locked ? 'none' : 'flex';
-  if (!locked) firing = false;
+  if (locked) {
+    // Chromium/Vivaldi viewport bug: the window can report a stale size right
+    // after pointer lock is acquired — force an immediate resize resync.
+    window.dispatchEvent(new Event('resize'));
+  } else {
+    firing = false;
+  }
   // No manual matrix reset on the menu -> play transition: camera.position /
   // camera.rotation are written exclusively by the frame loop, and with
   // matrixAutoUpdate enabled three.js recomposes both matrices from

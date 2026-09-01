@@ -26,7 +26,10 @@
     -webkit-user-select: none;
   }
 
-  #game { position: fixed; inset: 0; display: block; cursor: crosshair; }
+  #game {
+    position: absolute; top: 0; left: 0; width: 100vw; height: 100vh;
+    display: block; margin: 0; padding: 0; overflow: hidden; cursor: crosshair;
+  }
 
   /* CRT scanline overlay */
   #scanlines {
