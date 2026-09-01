@@ -15,7 +15,9 @@
  *    validated with Number.isFinite; NaN/undefined samples fall back to the last
  *    known-good coordinates (prevents the dark-screen bug from corrupt data).
  *    The frame loop is the ONLY writer of camera.position / camera.rotation, and
- *    camera.updateProjectionMatrix() runs only on window resize events.
+ *    camera.updateProjectionMatrix() runs only via handleResize() — on window
+ *    resize events or the deferred pointer-lock resync (rAF-guarded against
+ *    zero viewport dimensions).
  *  - Input listeners: pointer lock mouse look, WASD + jump, fire hold,
  *    weapon switching (keys 1-7 / wheel). Input is streamed to the server at
  *    display rate; the server stays authoritative.
@@ -127,14 +129,25 @@ scene.add(sun);
 // the camera must live in the scene graph for its children (viewmodel) to render
 scene.add(camera);
 
-window.addEventListener('resize', () => {
-  camera.aspect = window.innerWidth / window.innerHeight;
-  // explicit resync: force the drawing buffer + CSS size to the real viewport
-  // (Chromium/Vivaldi can report a stale viewport right after pointer lock)
-  renderer.setSize(window.innerWidth, window.innerHeight, true);
-  renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+/**
+ * Safe canvas resize: re-sync the projection matrix and drawing buffer to the
+ * real viewport. Zero dimensions are aborted immediately — a zero-size
+ * viewport would build a degenerate (zero) projection matrix and crash WebGL.
+ * updateStyle=false so CSS keeps owning the element layout; only the drawing
+ * buffer is resized here.
+ */
+function handleResize() {
+  const w = window.innerWidth || 1;
+  const h = window.innerHeight || 1;
+  if (w === 0 || h === 0) return; // abort: prevent WebGL zero-matrix crashes
+
+  camera.aspect = w / h;
   camera.updateProjectionMatrix();
-});
+  renderer.setSize(w, h, false);
+  renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+}
+
+window.addEventListener('resize', handleResize);
 
 /* ============================== MATERIALS ================================== */
 
@@ -932,8 +945,9 @@ document.addEventListener('pointerlockchange', () => {
   el.lockOverlay.style.display = locked ? 'none' : 'flex';
   if (locked) {
     // Chromium/Vivaldi viewport bug: the window can report a stale size right
-    // after pointer lock is acquired — force an immediate resize resync.
-    window.dispatchEvent(new Event('resize'));
+    // after pointer lock is acquired — defer the resize resync to the next
+    // animation frame instead of dispatching a synthetic resize event.
+    requestAnimationFrame(() => handleResize());
   } else {
     firing = false;
   }
