@@ -897,9 +897,19 @@ document.addEventListener('mousemove', (e) => {
 });
 
 document.addEventListener('pointerlockchange', () => {
+  const wasLocked = locked;
   locked = document.pointerLockElement === canvas;
   el.lockOverlay.style.display = locked ? 'none' : 'flex';
   if (!locked) firing = false;
+  else if (!wasLocked) {
+    // menu -> play transition: clear any stray offsets baked into the camera's
+    // local/world matrices so the first locked frame starts from a clean state.
+    // matrixAutoUpdate recomposes both from position/quaternion/scale on the next
+    // render, which is exactly the world-space pose we want (no parent chain).
+    camera.matrix.identity();
+    camera.matrixWorld.identity();
+    camera.updateProjectionMatrix();
+  }
 });
 
 el.lockOverlay.addEventListener('click', () => {
@@ -1058,34 +1068,10 @@ const isFiniteNum = (v) => typeof v === 'number' && Number.isFinite(v);
 // last known-good camera transform (seeded with the initial pre-join pose)
 const camLast = { x: 0, y: EYE_HEIGHT, z: 24, pitch: 0, yaw: 0 };
 
-/** Validate + apply the camera position. Falls back to the previous valid
- *  coordinates when any component is NaN/undefined (prevents dark screen). */
-function setCameraPosition(x, y, z) {
-  if (isFiniteNum(x) && isFiniteNum(y) && isFiniteNum(z)) {
-    camera.position.set(x, y, z);
-    camLast.x = x; camLast.y = y; camLast.z = z;
-    return true;
-  }
-  // corrupt sample: hold last valid coordinates and refresh the projection
-  camera.position.set(camLast.x, camLast.y, camLast.z);
-  camera.updateProjectionMatrix();
-  return false;
-}
-
-/** Validate + apply the camera orientation (pitch = rotation.x, yaw = rotation.y
- *  in this client's YXZ mouse-look order). Same fallback contract as
- *  setCameraPosition. */
-function setCameraRotation(pitchV, yawV) {
-  if (isFiniteNum(pitchV) && isFiniteNum(yawV)) {
-    camera.rotation.set(pitchV, yawV, 0);
-    camLast.pitch = pitchV; camLast.yaw = yawV;
-    return true;
-  }
-  // corrupt sample: hold last valid orientation and refresh the projection
-  camera.rotation.set(camLast.pitch, camLast.yaw, 0);
-  camera.updateProjectionMatrix();
-  return false;
-}
+// scratch buffer for the explicit orientation copy in updateEntities — YXZ order
+// to match camera.rotation.order (Euler.copy also copies `order`, so a default-
+// order temp would silently flip the mouse-look axes)
+const playerRotation = new THREE.Euler(0, 0, 0, 'YXZ');
 
 /* ============================== FRAME LOOP ================================= */
 
@@ -1101,29 +1087,51 @@ function updateEntities(now, dt) {
   selfSpeed += (targetSpeed - selfSpeed) * Math.min(1, dt * 6);
 
   // --- local player camera ---------------------------------------------------
-  // Clean world-space sync: the camera is placed DIRECTLY at
-  // (me.x, me.y + EYE_HEIGHT, me.z) — no parent transform, no offset chain.
-  // There are no local collision volumes to clip against: the self body/head
-  // mesh is excluded from rendering entirely (see makePlayerMesh / remote loop),
-  // and feetY is clamped at the floor plane so extrapolation across a snapshot
-  // gap can never dip the camera below ground. Every value is validated before
-  // touching the camera matrix (see setCameraPosition / setCameraRotation):
+  // Explicit world-space sync, done right here in the frame loop: the camera is
+  // a DIRECT child of the root scene (never parented to any player mesh), so
+  // writing camera.position / camera.rotation below writes world space directly —
+  // there is no parent transform that could inject stray offsets. The local
+  // player's state comes from the interpolated snapshot sample
+  // `self` = [id, x, y(feet), z, ...], giving exactly:
+  //   camera.position.set(player.x, player.y + EYE_HEIGHT, player.z)
+  //   camera.rotation.copy(playerRotation)   (local mouse-look yaw/pitch here)
+  // The self body/head mesh is excluded from rendering entirely (see
+  // makePlayerMesh / remote loop), and feetY is clamped at the floor plane so
+  // extrapolation across a snapshot gap can never dip the camera below ground.
+  // Every value is validated with Number.isFinite before it touches the camera:
   // NaN/undefined in a corrupt sample would poison the view matrix and render
   // every subsequent frame as a dark screen, so bad input falls back to the last
-  // known-good coordinates.
+  // known-good coordinates (camLast).
   const self = sampleAt(me, rtSelf, 5);
   if (self && me != null) {
     const dead = latestState.p.find((p) => p[0] === me);
     if (!dead || dead[8] !== 1) {
-      const feetY = Math.max(self[2], 0);
       // screen shake offset
       let sx = 0, sy = 0;
       if (shakeMag > 0) {
         sx = (Math.random() - 0.5) * shakeMag;
         sy = (Math.random() - 0.5) * shakeMag;
       }
-      setCameraPosition(self[1], feetY + EYE_HEIGHT, self[3]);
-      setCameraRotation(pitch + sy, yaw + sx * 0.6);
+
+      // explicit position copy in world space, per-component NaN validation:
+      //   camera.position.set(player.x, player.y + EYE_HEIGHT, player.z)
+      const okX = isFiniteNum(self[1]), okY = isFiniteNum(self[2]), okZ = isFiniteNum(self[3]);
+      const px = okX ? self[1] : camLast.x;
+      const py = Math.max(okY ? self[2] : 0, 0); // feet clamped at the floor plane
+      const pz = okZ ? self[3] : camLast.z;
+      camera.position.set(px, py + EYE_HEIGHT, pz);
+      camLast.x = px; camLast.y = py + EYE_HEIGHT; camLast.z = pz;
+
+      // explicit orientation copy in world space (YXZ mouse-look order: pitch=x, yaw=y)
+      const rp = isFiniteNum(pitch + sy) ? pitch + sy : camLast.pitch;
+      const ry = isFiniteNum(yaw + sx * 0.6) ? yaw + sx * 0.6 : camLast.yaw;
+      playerRotation.set(rp, ry, 0);
+      camera.rotation.copy(playerRotation);
+      if (isFiniteNum(pitch)) camLast.pitch = pitch;
+      if (isFiniteNum(yaw)) camLast.yaw = yaw;
+
+      // corrupt sample: refresh the projection so the next render starts clean
+      if (!okX || !okY || !okZ) camera.updateProjectionMatrix();
     }
   }
 
