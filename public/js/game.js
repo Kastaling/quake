@@ -1574,13 +1574,13 @@ function updateEntities(now, dt) {
       z.group.position.set(s[1], s[2], s[3]);
       // Face the chase path toward the player (from extrapolated velocity). The
       // model's front is local -Z (eyes/arms), and rotation.y = theta maps that to
-      // world (-sin(theta), -cos(theta)), so atan2(-dx, -dz) points it along the
-      // movement direction — no Math.PI flip needed.
+      // world (-sin(theta), -cos(theta)); adding Math.PI flips the heading so the
+      // negative-Z front aligns with the movement vector.
       const b = entBuf.get(e[0]);
       if (b && b.length >= 2) {
         const dx = s[1] - b[b.length - 2].v[1];
         const dz = s[3] - b[b.length - 2].v[3];
-        if (Math.hypot(dx, dz) > 0.001) z.group.rotation.y = Math.atan2(-dx, -dz);
+        if (Math.hypot(dx, dz) > 0.001) z.group.rotation.y = Math.atan2(-dx, -dz) + Math.PI;
       }
       // shamble bob
       z.group.position.y += Math.abs(Math.sin(now * 6 + e[0])) * 0.08;
