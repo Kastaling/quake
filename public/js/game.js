@@ -80,10 +80,18 @@ const zombies3d = new Map();   // id -> { group, typeIdx }
 const projectiles3d = new Map();// id -> { mesh, trail, kind }
 const pickups3d = new Map();   // id -> { group, baseY }
 let button3d = {};             // 'nuke' | 'inhibit' -> { group, fill, dome, light, label }
+// Linked portal teleporters: 'A' | 'B' -> { group, field, core, light, phase, flash, x, z }
+const portals3d = {};
 
 /* --- snapshot interpolation buffer ------------------------------------------ */
+// Buffers are namespaced PER ENTITY TYPE ('p:<id>', 'z:<id>', 'pr:<id>'). Player,
+// zombie and projectile ids all start at 1 on the server and collide freely — a
+// single raw-id map mixed grenade samples into zombie/player history (and vice
+// versa), so meshes interpolated from that shared ring lagged behind / ghosted
+// ahead of their true server state. Strict per-type keys keep every mesh synced
+// to its own server-state id only.
 const snapBuf = [];            // recent raw snapshots (for HUD / latest state)
-const entBuf = new Map();      // entity id -> [{t, v}] ring of samples
+const entBuf = new Map();      // namespaced key ('p:1' | 'z:3' | 'pr:7') -> [{t, v}] ring of samples
 const INTERP_DELAY = 0.12;     // render delay for remote entities
 const SELF_DELAY = 0.045;      // shorter delay for the local player (shake-distance sampling)
 const EYE_HEIGHT = 1.6;        // camera height above feet (mirrors server EYE)
@@ -134,7 +142,9 @@ renderer.setSize(window.innerWidth, window.innerHeight);
 
 const scene = new THREE.Scene();
 scene.background = new THREE.Color(0x05070d);
-scene.fog = new THREE.Fog(0x05070d, 35, 100);
+// Fog range scaled for the doubled arena (160u wide, ~226u corner-to-corner) so
+// the far walls stay visible instead of dissolving into the background.
+scene.fog = new THREE.Fog(0x05070d, 45, 210);
 
 const camera = new THREE.PerspectiveCamera(BASE_FOV, window.innerWidth / window.innerHeight, 0.1, 250);
 camera.rotation.order = 'YXZ';
@@ -185,6 +195,7 @@ const MAT = {
   meterFillInhibit: new THREE.MeshBasicMaterial({ color: 0x39d98a, side: THREE.DoubleSide }),
   health: new THREE.MeshLambertMaterial({ color: 0x2ecc40, emissive: 0x115522 }),
   ammoCrate: new THREE.MeshLambertMaterial({ color: 0xd69e2e, emissive: 0x3a2a08 }),
+  portalFrame: new THREE.MeshLambertMaterial({ color: 0x2a2438, emissive: 0x150d24 }), // dark violet stone arch
   rocket: new THREE.MeshBasicMaterial({ color: 0xff7b24 }),
   grenade: new THREE.MeshBasicMaterial({ color: 0xa8e05f }),
   nail: new THREE.MeshBasicMaterial({ color: 0xdfe8ff }),   // bright steel sliver (nailgun)
@@ -209,7 +220,7 @@ function makeGridTexture() {
     g.fillStyle = `rgba(140,180,255,${Math.random() * 0.04})`;
     g.fillRect(Math.floor(Math.random() * 512), Math.floor(Math.random() * 512), 1, 1);
   }
-  const cells = 40; // 80 world units / 2u cell
+  const cells = 80; // 160 world units / 2u cell (arena doubled to +/-80)
   const px = 512 / cells;
   g.strokeStyle = 'rgba(70,160,255,0.22)';
   g.lineWidth = 1;
@@ -367,6 +378,55 @@ function buildWorld(map) {
     pickups3d.set(id, { group, baseY: y + 0.55 });
   }
 
+  // linked portal teleporters (Portal A / Portal B): doorway arch geometry with a
+  // glowing additive portal field. The server is authoritative for the actual
+  // translation — this is pure presentation at the positions from init.map.portals.
+  for (const pt of map.portals || []) {
+    const group = new THREE.Group();
+
+    // local frame: doorway opening faces +Z, width along X; rotated below so +Z
+    // aligns with the portal's `dir` vector (the direction into the arena)
+    const pillarGeo = new THREE.BoxGeometry(0.7, 3.4, 1.1);
+    for (const dx of [-1.55, 1.55]) {
+      const pil = new THREE.Mesh(pillarGeo, MAT.portalFrame);
+      pil.position.set(dx, 1.7, 0);
+      group.add(pil);
+    }
+    const lintel = new THREE.Mesh(new THREE.BoxGeometry(4.6, 0.7, 1.1), MAT.portalFrame);
+    lintel.position.set(0, 3.75, 0);
+    group.add(lintel);
+    const threshold = new THREE.Mesh(new THREE.BoxGeometry(4.2, 0.22, 1.8), MAT.portalFrame);
+    threshold.position.set(0, 0.11, 0);
+    group.add(threshold);
+
+    // glowing portal field: wide violet sheet + brighter inner core (additive so it
+    // reads as energy, not a wall; depthWrite off so the far side shows through)
+    const fieldMat = new THREE.MeshBasicMaterial({ color: 0xb44dff, transparent: true, opacity: 0.5, blending: THREE.AdditiveBlending, side: THREE.DoubleSide, depthWrite: false });
+    const coreMat = new THREE.MeshBasicMaterial({ color: 0xe6c8ff, transparent: true, opacity: 0.7, blending: THREE.AdditiveBlending, side: THREE.DoubleSide, depthWrite: false });
+    const field = new THREE.Mesh(new THREE.PlaneGeometry(3.1, 3.0), fieldMat);
+    field.position.set(0, 1.75, 0);
+    group.add(field);
+    const core = new THREE.Mesh(new THREE.PlaneGeometry(1.7, 2.4), coreMat);
+    core.position.set(0, 1.7, 0.03);
+    group.add(core);
+
+    const light = new THREE.PointLight(0xb44dff, 1.6, 20);
+    light.position.set(0, 2.3, 0);
+    group.add(light);
+
+    // orient local +Z along the portal's dir vector (into the arena)
+    const rotY = pt.axis === 'x' ? (pt.dir > 0 ? Math.PI / 2 : -Math.PI / 2) : (pt.dir > 0 ? 0 : Math.PI);
+    group.rotation.y = rotY;
+    group.position.set(pt.x, 0, pt.z); // portals sit on open floor (server places them off all solids)
+    scene.add(group);
+
+    portals3d[pt.id] = {
+      group, field, core, light, x: pt.x, z: pt.z,
+      phase: pt.id === 'A' ? 0 : Math.PI / 2, // offset the two pulses so they don't breathe in unison
+      flash: 0,                               // trigger flash (decays per frame)
+    };
+  }
+
   // build the weapon strip HUD from server definitions
   el.weaponStrip.innerHTML = '';
   weaponDefs.forEach((w, i) => {
@@ -501,16 +561,20 @@ function pushSnapshot(data) {
   if (snapBuf.length > 45) snapBuf.shift();
   latestState = data;
 
+  // Namespaced per type: a player, zombie and projectile can share the same raw
+  // server id without ever touching each other's sample history.
+  const live = new Set();
   for (const key of ['p', 'z', 'pr']) {
     for (const e of data[key]) {
-      let b = entBuf.get(e[0]);
-      if (!b) { b = []; entBuf.set(e[0], b); }
+      const k = `${key}:${e[0]}`;
+      let b = entBuf.get(k);
+      if (!b) { b = []; entBuf.set(k, b); }
       b.push({ t, v: e });
       while (b.length && t - b[0].t > 1.2) b.shift(); // keep ~1.2 s of history
+      live.add(k);
     }
   }
-  const live = new Set([...data.p, ...data.z, ...data.pr].map((e) => e[0]));
-  for (const id of [...entBuf.keys()]) if (!live.has(id)) entBuf.delete(id);
+  for (const k of [...entBuf.keys()]) if (!live.has(k)) entBuf.delete(k);
 
   // Local player network target — the ONLY thing snapshot data may write directly.
   // Validated here so NaN/undefined can never reach the lerp or the camera in the
@@ -530,14 +594,20 @@ function pushSnapshot(data) {
  * Sample an entity's state at render time `rt`: interpolate between the two
  * bracketing snapshots; extrapolate with capped velocity when data runs out.
  * posCount = number of leading fields (after id) that are continuous values.
+ * key is the namespaced buffer key ('p:<id>' | 'z:<id>' | 'pr:<id>').
+ * hold=true disables the predictive extrapolation tail entirely: once the latest
+ * server sample is reached, the position HOLDS at exactly that server state until
+ * the next snapshot arrives. Projectiles (grenades/rockets/nails) use this so
+ * their meshes strictly track server-state ids — no client-predicted fallback
+ * mesh can drift ahead of or lag behind authoritative updates.
  */
-function sampleAt(id, rt, posCount) {
-  const b = entBuf.get(id);
+function sampleAt(key, rt, posCount, hold = false) {
+  const b = entBuf.get(key);
   if (!b || !b.length) return null;
   const last = b[b.length - 1];
 
   if (rt >= last.t - 0.002) {
-    if (b.length < 2) return last.v.slice();
+    if (hold || b.length < 2) return last.v.slice(); // strict server sync: hold, don't predict
     const prev = b[b.length - 2];
     const dt = Math.max(0.001, last.t - prev.t);
     const ext = Math.min(rt - last.t, 0.35) / dt; // cap extrapolation at 350 ms
@@ -574,7 +644,7 @@ function sampleAt(id, rt, posCount) {
  */
 function estimateSelfSpeed() {
   if (me == null) return 0;
-  const b = entBuf.get(me);
+  const b = entBuf.get(`p:${me}`); // namespaced: only my own player samples, never zombie/proj collisions
   if (!b || b.length < 2) return 0;
   const a = b[b.length - 2], c = b[b.length - 1];
   // ignore teleport-sized jumps (respawn / OOB relocation) and corrupt samples —
@@ -861,7 +931,7 @@ function spawnExplosionVisual(e) {
 
   // screen shake scaled by proximity to the local player
   if (me != null && latestState) {
-    const self = sampleAt(me, performance.now() / 1000 - SELF_DELAY, 5);
+    const self = sampleAt(`p:${me}`, performance.now() / 1000 - SELF_DELAY, 5);
     if (self) {
       const d = Math.hypot(self[1] - e.x, self[2] - e.y, self[3] - e.z);
       if (d < e.r * 2.5 + 4) {
@@ -1456,6 +1526,19 @@ function onEvent(e) {
       addFeedLine(e.which === 'nuke' ? 'NUKE DETONATED — HORDE WIPED' : 'INHIBIT ACTIVE — SPAWNS OFF 30s', 'feed-btn');
       break;
     }
+    case 'portal': {
+      // A player just hopped through the linked pair: flash BOTH doorways (the hop is
+      // server-authoritative — positions arrive via snapshots, and both the local
+      // camera lerp and remote-mesh sampling snap on teleport-sized jumps) and play a
+      // positional whoosh at each end of the link.
+      for (const id of Object.keys(portals3d)) {
+        const pt = portals3d[id];
+        pt.flash = 1;
+        SFX.playZap([pt.x, 2.0, pt.z]);
+      }
+      addFeedLine(`PORTAL ${e.p} → PORTAL ${e.p === 'A' ? 'B' : 'A'} TELEPORT`, 'feed-btn');
+      break;
+    }
     case 'hit': {
       // small spark where a zombie took damage (position from its mesh)
       const z = zombies3d.get(e.id);
@@ -1584,7 +1667,7 @@ function updateEntities(now, dt) {
     seenP.add(e[0]);
     let p = players3d.get(e[0]);
     if (!p) p = players3d.set(e[0], makePlayerMesh(e[0])).get(e[0]);
-    const s = sampleAt(e[0], rtOthers, 5);
+    const s = sampleAt(`p:${e[0]}`, rtOthers, 5); // namespaced: this player's own samples only
     // skip corrupt samples (NaN/undefined): hold the last valid transform so a bad
     // snapshot can never write NaN into an entity's matrix
     if (s && isFiniteNum(s[1]) && isFiniteNum(s[2]) && isFiniteNum(s[3])) {
@@ -1609,14 +1692,14 @@ function updateEntities(now, dt) {
       z = zombies3d.set(e[0], makeZombieMesh(e[4])).get(e[0]);
       z.typeIdx = e[4];
     }
-    const s = sampleAt(e[0], rtOthers, 3);
+    const s = sampleAt(`z:${e[0]}`, rtOthers, 3); // namespaced: this zombie's own samples only
     if (s && isFiniteNum(s[1]) && isFiniteNum(s[2]) && isFiniteNum(s[3])) {
       z.group.position.set(s[1], s[2], s[3]);
       // Face the chase path toward the player (from extrapolated velocity). The
       // model's front is local -Z (eyes/arms), and rotation.y = theta maps that to
       // world (-sin(theta), -cos(theta)); adding Math.PI flips the heading so the
       // negative-Z front aligns with the movement vector.
-      const b = entBuf.get(e[0]);
+      const b = entBuf.get(`z:${e[0]}`); // namespaced: this zombie's own samples only
       if (b && b.length >= 2) {
         const dx = s[1] - b[b.length - 2].v[1];
         const dz = s[3] - b[b.length - 2].v[3];
@@ -1629,6 +1712,12 @@ function updateEntities(now, dt) {
   for (const id of [...zombies3d.keys()]) if (!seenZ.has(id)) removeZombieMesh(id);
 
   // --- projectiles ---------------------------------------------------------------
+  // Strict server-state sync: each mesh is keyed by its authoritative projectile id
+  // and sampled from that id's OWN namespaced buffer with hold=true — no predictive
+  // extrapolation tail. A grenade mesh can therefore never exist as a disconnected
+  // client-predicted fallback lagging behind (or ghosting ahead of) server updates:
+  // it renders exactly where the last snapshot for its id says, and is removed the
+  // same frame its id leaves latestState.pr (detonation / out-of-bounds).
   const seenPr = new Set();
   for (const e of latestState.pr) {
     seenPr.add(e[0]);
@@ -1638,7 +1727,7 @@ function updateEntities(now, dt) {
       if (pr) removeProjectileMesh(e[0]);
       pr = projectiles3d.set(e[0], makeProjectileMesh(kind)).get(e[0]);
     }
-    const s = sampleAt(e[0], rtOthers, 3);
+    const s = sampleAt(`pr:${e[0]}`, rtOthers, 3, true);
     if (s && isFiniteNum(s[1]) && isFiniteNum(s[2]) && isFiniteNum(s[3])) {
       pr.mesh.position.set(s[1], s[2], s[3]);
       // trail history
@@ -1684,6 +1773,18 @@ function updateEntities(now, dt) {
       bt.dome.material.color.setHex(b.i > 0 ? 0x5ec8ff : 0x2a4a6a);
       bt.light.intensity += ((b.i > 0 ? 2.2 : 0.7) - bt.light.intensity) * 0.1;
     }
+  }
+
+  // --- portals: breathing field pulse + teleport-trigger flash ----------------------
+  for (const id of Object.keys(portals3d)) {
+    const pt = portals3d[id];
+    if (pt.flash > 0) pt.flash = Math.max(0, pt.flash - dt * 2.2); // decay after a hop
+    const pulse = 0.45 + 0.18 * Math.sin(now * 2.6 + pt.phase);
+    pt.field.material.opacity = Math.min(1, pulse + pt.flash * 0.55);
+    pt.core.material.opacity = Math.min(1, 0.7 + 0.15 * Math.sin(now * 4.3 + pt.phase) + pt.flash * 0.6);
+    const sw = 1 + 0.025 * Math.sin(now * 3.1 + pt.phase); // subtle field shimmer
+    pt.field.scale.set(sw, 1 + 0.02 * Math.cos(now * 2.7 + pt.phase), 1);
+    pt.light.intensity += ((1.4 + 0.5 * Math.sin(now * 5.2 + pt.phase) + pt.flash * 6) - pt.light.intensity) * 0.15;
   }
 
   // --- viewmodel (bob driven by the snapshot-derived speed estimate) ---------------

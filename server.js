@@ -44,7 +44,7 @@ const DT = 1 / TICK_RATE;             // fixed timestep
 const SNAPSHOT_EVERY = 2;             // broadcast world state every N ticks (30 Hz)
 
 /* --- Arena geometry -------------------------------------------------------- */
-const ARENA_HALF = 40;                // outer walls at +/-40
+const ARENA_HALF = 80;                // outer walls at +/-80 (arena doubled from +/-40)
 const PLAT_HALF = 6;                  // central platform half-extent
 const PLAT_TOP = 2.0;                 // central platform height
 const RAMP_LEN = 4;                   // ramp run length (one per side)
@@ -110,42 +110,61 @@ const HEALTH_RESPAWN = 10;            // seconds
 const AMMO_RESPAWN = 15;              // seconds
 
 /* --- Static map solids (cover blocks + central platform) --------------------- */
+// Arena doubled to +/-80: every cover block / crate / side platform is scaled 2x
+// in X/Z and redistributed across the expanded layout. The central platform with
+// the NUKE/INHIBIT buttons stays at its original size as the map's focal point.
 const SOLIDS = [
   { minX: -PLAT_HALF, maxX: PLAT_HALF, minZ: -PLAT_HALF, maxZ: PLAT_HALF, top: PLAT_TOP }, // center platform
-  { minX: -14, maxX: -10, minZ: -3, maxZ: 3,   top: 1.6 },   // west cover block
-  { minX:  10, maxX:  14, minZ: -3, maxZ: 3,   top: 1.6 },   // east cover block
-  { minX: -3,  maxX:  3,  minZ: -20, maxZ: -16, top: 1.2 },  // north cover block
-  { minX: -3,  maxX:  3,  minZ: 16,  maxZ: 20,  top: 1.2 },  // south cover block
-  { minX: -8,  maxX: -6,  minZ: 10,  maxZ: 26,  top: 1.5 },  // west wall segment
-  { minX:  6,  maxX:  8,  minZ: -26, maxZ: -10, top: 1.5 },  // east wall segment
-  { minX: -30, maxX: -27, minZ: -30, maxZ: -27, top: 1.4 },  // corner crates
-  { minX:  27, maxX:  30, minZ: -30, maxZ: -27, top: 1.4 },
-  { minX: -30, maxX: -27, minZ: 27,  maxZ: 30,  top: 1.4 },
-  { minX:  27, maxX:  30, minZ: 27,  maxZ: 30,  top: 1.4 },
-  { minX: -24, maxX: -18, minZ: 6,   maxZ: 12,  top: 1.8 },  // elevated side platforms (jumpable)
-  { minX:  18, maxX:  24, minZ: -12, maxZ: -6,  top: 1.8 },
+  { minX: -28, maxX: -20, minZ: -6, maxZ: 6,   top: 1.6 },   // west cover block
+  { minX:  20, maxX:  28, minZ: -6, maxZ: 6,   top: 1.6 },   // east cover block
+  { minX: -6,  maxX:  6,  minZ: -40, maxZ: -32, top: 1.2 },  // north cover block
+  { minX: -6,  maxX:  6,  minZ: 32,  maxZ: 40,  top: 1.2 },  // south cover block
+  { minX: -16, maxX: -12, minZ: 20,  maxZ: 52,  top: 1.5 },  // west wall segment
+  { minX:  12, maxX:  16, minZ: -52, maxZ: -20, top: 1.5 },  // east wall segment
+  { minX: -60, maxX: -54, minZ: -60, maxZ: -54, top: 1.4 },  // corner crates
+  { minX:  54, maxX:  60, minZ: -60, maxZ: -54, top: 1.4 },
+  { minX: -60, maxX: -54, minZ: 54,  maxZ: 60,  top: 1.4 },
+  { minX:  54, maxX:  60, minZ: 54,  maxZ: 60,  top: 1.4 },
+  { minX: -48, maxX: -36, minZ: 12,  maxZ: 24,  top: 1.8 },  // elevated side platforms (jumpable)
+  { minX:  36, maxX:  48, minZ: -24, maxZ: -12, top: 1.8 },
 ];
 
 /* --- Pickups (defined after SOLIDS so groundHeightAt() can resolve tops) ----- */
+// Positions scaled 2x to match the doubled arena.
 const PICKUPS = [
-  { id: 1, kind: 'health', x: -18, z: -14 },
-  { id: 2, kind: 'health', x:  18, z:  14 },
-  { id: 3, kind: 'health', x: -14, z:  18 },
-  { id: 4, kind: 'health', x:  14, z: -18 },
-  { id: 5, kind: 'health', x:   0, z: -26 },
-  { id: 6, kind: 'health', x:   0, z:  26 },
-  { id: 7, kind: 'ammo',   x: -32, z:   0 },
-  { id: 8, kind: 'ammo',   x:  32, z:   0 },
-  { id: 9, kind: 'ammo',   x:   0, z: -32 },
-  { id: 10, kind: 'ammo',  x:   0, z:  32 },
+  { id: 1, kind: 'health', x: -36, z: -28 },
+  { id: 2, kind: 'health', x:  36, z:  28 },
+  { id: 3, kind: 'health', x: -28, z:  36 },
+  { id: 4, kind: 'health', x:  28, z: -36 },
+  { id: 5, kind: 'health', x:   0, z: -52 },
+  { id: 6, kind: 'health', x:   0, z:  52 },
+  { id: 7, kind: 'ammo',   x: -64, z:   0 },
+  { id: 8, kind: 'ammo',   x:  64, z:   0 },
+  { id: 9, kind: 'ammo',   x:   0, z: -64 },
+  { id: 10, kind: 'ammo',  x:   0, z:  64 },
 ].map((p) => ({ ...p, y: groundHeightAt(p.x, p.z), taken: false, timer: 0 }));
 
 /* --- Spawn points (perimeter ring) ------------------------------------------ */
+// Ring radius doubled to 64 and widened from 8 to 12 points so respawns stay
+// well distributed around the expanded +/-80 perimeter.
 const SPAWNS = [];
-for (let i = 0; i < 8; i++) {
-  const a = (i * Math.PI) / 4 + Math.PI / 8;
-  SPAWNS.push({ x: Math.cos(a) * 32, z: Math.sin(a) * 32 });
+for (let i = 0; i < 12; i++) {
+  const a = (i * Math.PI) / 6 + Math.PI / 12;
+  SPAWNS.push({ x: Math.cos(a) * 64, z: Math.sin(a) * 64 });
 }
+
+/* --- Linked portal teleporters ---------------------------------------------- */
+// Paired doorway entities: walking into Portal A instantly translates the player
+// (position + momentum vector) out of Portal B, and vice versa. `axis` is the
+// doorway's normal axis ('x' or 'z'); `dir` points from the doorway INTO the
+// arena (the exit side). The 0.5 s per-player cooldown prevents instant
+// re-trigger loops if an exit ever overlaps another trigger zone.
+const PORTAL_CD = 0.5;                // seconds before a player may teleport again
+const PORTALS = [
+  { id: 'A', x: -72, z: -34, axis: 'x', dir: 1 },   // west flank doorway, faces +X into the arena
+  { id: 'B', x:  72, z:  34, axis: 'x', dir: -1 },  // east flank doorway, faces -X into the arena
+];
+const PORTAL_PAIR = { A: 'B', B: 'A' };
 
 /* ============================== WORLD STATE ================================= */
 
@@ -295,6 +314,38 @@ function updatePlayerPhysics(p, dt) {
     p.y = gh; p.vy = 0; p.onGround = true;   // landed / resting on floor or ramp
   } else {
     p.onGround = false;
+  }
+}
+
+/* ============================== PORTAL TELEPORTERS ========================== */
+
+/**
+ * Linked Quake-style portal doors: if the player's feet are inside a doorway
+ * trigger zone (and their per-player cooldown has elapsed), instantly translate
+ * them out of the paired portal. The translation is pure — position offset and
+ * the full momentum vector (vx, vy, vz) carry through unchanged, so bhop /
+ * blast-jump velocity survives the hop. A 0.5 s cooldown then blocks any
+ * re-trigger while the player settles on the far side.
+ */
+function checkPortals(p) {
+  if (p.portalCd > 0) return;
+  for (const pt of PORTALS) {
+    const along = pt.axis === 'x' ? p.x - pt.x : p.z - pt.z;   // depth into the doorway plane
+    const across = pt.axis === 'x' ? p.z - pt.z : p.x - pt.x;  // offset across the doorway width
+    if (Math.abs(along) < 1.3 && Math.abs(across) < 1.7) {
+      const exit = PORTALS.find((q) => q.id === PORTAL_PAIR[pt.id]);
+      const ex = exit.axis === 'x' ? exit.x + exit.dir * 1.5 : exit.x; // just inside the far doorway
+      const ez = exit.axis === 'z' ? exit.z + exit.dir * 1.5 : exit.z;
+      // preserve height above local ground so mid-air entries land at matching altitude
+      const hAbove = Math.max(0, p.y - groundHeightAt(p.x, p.z));
+      p.x = ex; p.z = ez;
+      p.y = groundHeightAt(ex, ez) + hAbove;
+      // momentum vector (vx, vy, vz) is intentionally left untouched: pure translation
+      checkGround(p);
+      p.portalCd = PORTAL_CD;
+      emitEvent({ t: 'portal', p: pt.id });   // client flashes both doorways + whoosh
+      return;
+    }
   }
 }
 
@@ -847,6 +898,7 @@ function respawn(p) {
   p.x = s.x; p.z = s.z;
   p.y = groundHeightAt(s.x, s.z) + SPAWN_ABOVE; // start above the floor mesh (never clip in)
   p.vx = 0; p.vy = 0; p.vz = 0;
+  p.portalCd = 0;    // fresh portal cooldown on respawn
   checkGround(p);    // immediate ground check: consistent state before the first snapshot
   p.hp = 100;
   p.dead = false;
@@ -892,6 +944,7 @@ function createPlayer(socket, name) {
     x: s.x, y: groundHeightAt(s.x, s.z) + SPAWN_ABOVE, z: s.z, vx: 0, vy: 0, vz: 0,
     yaw, pitch: 0,
     hp: 100, dead: false, respawnT: 0, onGround: false, // airborne until the spawn drop settles
+    portalCd: 0,                                        // linked-portal teleport cooldown (s)
     weapon: 0, ammo: { ...AMMO_MAX }, fireCd: 0, firingHeld: false,
     input: { f: 0, s: 0, jump: false, fire: false, yaw, pitch: 0 },
     kills: 0, deaths: 0, r: PLAYER_R, h: PLAYER_H,
@@ -909,6 +962,7 @@ function buildInit(p) {
       solids: SOLIDS.map((s) => [s.minX, s.maxX, s.minZ, s.maxZ, s.top]),
       plat: [PLAT_HALF, PLAT_TOP, RAMP_LEN, RAMP_W],
       buttons: BUTTONS.map((b) => ({ id: b.id, x: b.x, y: b.y, z: b.z, r: b.r })),
+      portals: PORTALS.map((pt) => ({ id: pt.id, x: pt.x, z: pt.z, axis: pt.axis, dir: pt.dir })),
       pickups: PICKUPS.map((k) => [k.id, k.kind, k.x, k.y, k.z]),
     },
     weapons: WEAPONS.map((w) => ({ id: w.id, name: w.name, auto: w.auto, rate: w.rate, dmg: w.dmg, ammo: w.ammo, maxAmmo: w.maxAmmo })),
@@ -1018,7 +1072,9 @@ function step(dt) {
       if (p.respawnT <= 0) respawn(p);
       continue;
     }
+    if (p.portalCd > 0) p.portalCd = Math.max(0, p.portalCd - dt); // linked-portal cooldown
     updatePlayerPhysics(p, dt);
+    checkPortals(p);   // doorway trigger -> instant translation to the paired portal
     updateWeapon(p, dt);
     checkPickups(p);
   }
