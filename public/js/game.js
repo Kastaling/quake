@@ -341,19 +341,38 @@ function buildWorld(map) {
     scene.add(bridge);
   }
 
-  // ramp mesh helper: a sloped box whose TOP surface follows the server's
-  // height-field slope exactly (the walkable line from pTop down to pBot).
+  // ramp mesh helper: an exact solid wedge whose TOP surface follows the server's
+  // height-field slope exactly (the walkable line from pTop down to pBot). The
+  // cross-section is a right triangle under that line — a vertical face at the
+  // high end dropping straight to ground and a flat base on the floor — so no
+  // part of the mesh extends past either endpoint in X, nothing dips below
+  // ground level, and the top edge meets the deck face flush. (The low end is
+  // assumed to sit at ground level y=0.) DoubleSide keeps it robust for ramps
+  // whose width axis points either way along Z.
   const addRampMesh = (pTop, pBot, halfW) => {
     const sV = pBot.clone().sub(pTop).normalize();            // down-slope direction
-    const tV = new THREE.Vector3(0, 1, 0).cross(sV).normalize(); // horizontal tangent
-    let nV = tV.clone().cross(sV);                             // slope normal
-    if (nV.y < 0) nV.negate();
-    const mid = pTop.clone().add(pBot).multiplyScalar(0.5).sub(nV.clone().multiplyScalar(0.15));
-    const m4 = new THREE.Matrix4().makeBasis(tV, nV, sV);
-    m4.setPosition(mid.x, mid.y, mid.z);
-    const ramp = new THREE.Mesh(new THREE.BoxGeometry(halfW * 2, 0.3, pTop.distanceTo(pBot)), MAT.ramp);
-    ramp.quaternion.setFromRotationMatrix(m4);
-    scene.add(ramp);
+    const tV = new THREE.Vector3(0, 1, 0).cross(sV).normalize(); // horizontal width axis
+    const gTop = new THREE.Vector3(pTop.x, 0, pTop.z);         // ground under the high end
+    const wT = pTop.clone().add(tV.clone().multiplyScalar(halfW));   // top edge, +width side
+    const tT = pTop.clone().sub(tV.clone().multiplyScalar(halfW));   // top edge, -width side
+    const wB = pBot.clone().add(tV.clone().multiplyScalar(halfW));   // bottom edge, +width side
+    const tB = pBot.clone().sub(tV.clone().multiplyScalar(halfW));   // bottom edge, -width side
+    const gW = gTop.clone().add(tV.clone().multiplyScalar(halfW));   // ground corner, +width side
+    const gG = gTop.clone().sub(tV.clone().multiplyScalar(halfW));   // ground corner, -width side
+    // 6 vertices -> 9 triangles (3 quads + 2 end caps), CCW from outside.
+    const pos = [
+      wT, tT, tB,  wT, tB, wB,   // slope face — top surface on the walkable line
+      gW, gG, tT,  gW, tT, wT,   // vertical end face at the deck edge (x = pTop.x)
+      wB, tB, gG,  wB, gG, gW,   // base face on the ground (y = 0)
+      wT, wB, gW,                                // +width end cap
+      tT, gG, tB,                                // -width end cap
+    ];
+    const geo = new THREE.BufferGeometry();
+    geo.setAttribute('position', new THREE.Float32BufferAttribute(pos.flat(), 3));
+    geo.computeVertexNormals();
+    const mat = MAT.ramp.clone();
+    mat.side = THREE.DoubleSide;
+    scene.add(new THREE.Mesh(geo, mat));
   };
 
   // single outer access ramp: ground floor -> node N1's outer edge, matching the
