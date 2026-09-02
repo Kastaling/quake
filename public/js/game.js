@@ -81,7 +81,8 @@ const zombies3d = new Map();   // id -> { group, typeIdx }
 const projectiles3d = new Map();// id -> { mesh, trail, kind }
 const pickups3d = new Map();   // id -> { group, baseY }
 let button3d = {};             // 'nuke' | 'inhibit' -> { group, fill, dome, light, label }
-// Linked portal teleporters: 'A' | 'B' -> { group, field, core, light, phase, flash, x, z }
+// Linked portal teleporters (pairs A<->B ground flanks, C<->D ground/deck, E<->F deck ends):
+// id -> { group, field, core, light, phase, flash, x, y, z } (y = doorway floor level)
 const portals3d = {};
 
 /* --- snapshot interpolation buffer ------------------------------------------ */
@@ -417,10 +418,15 @@ function buildWorld(map) {
     pickups3d.set(id, { group, baseY: y + 0.55 });
   }
 
-  // linked portal teleporters (Portal A / Portal B): doorway arch geometry with a
-  // glowing additive portal field. The server is authoritative for the actual
-  // translation — this is pure presentation at the positions from init.map.portals.
-  for (const pt of map.portals || []) {
+  // linked portal teleporters: doorway arch geometry with a glowing additive
+  // portal field, one per registered pair end (ground flanks A/B, ground-deck
+  // C/D, deck ends E/F). The server is authoritative for the actual translation —
+  // this is pure presentation at the positions from init.map.portals. Each group
+  // origin sits on the doorway's own floor level (pt.y: 0 = ground, MEZZ_TOP =
+  // second-floor deck) so deck doorways stand on the rendered deck roof.
+  const portalList = map.portals || [];
+  for (let pi = 0; pi < portalList.length; pi++) {
+    const pt = portalList[pi];
     const group = new THREE.Group();
 
     // local frame: doorway opening faces +Z, width along X; rotated below so +Z
@@ -456,13 +462,13 @@ function buildWorld(map) {
     // orient local +Z along the portal's dir vector (into the arena)
     const rotY = pt.axis === 'x' ? (pt.dir > 0 ? Math.PI / 2 : -Math.PI / 2) : (pt.dir > 0 ? 0 : Math.PI);
     group.rotation.y = rotY;
-    group.position.set(pt.x, 0, pt.z); // portals sit on open floor (server places them off all solids)
+    group.position.set(pt.x, pt.y || 0, pt.z); // doorway stands on its own floor level (ground or deck)
     scene.add(group);
 
     portals3d[pt.id] = {
-      group, field, core, light, x: pt.x, z: pt.z,
-      phase: pt.id === 'A' ? 0 : Math.PI / 2, // offset the two pulses so they don't breathe in unison
-      flash: 0,                               // trigger flash (decays per frame)
+      group, field, core, light, x: pt.x, y: pt.y || 0, z: pt.z,
+      phase: pi * Math.PI / 3, // stagger each doorway's breathing pulse so they don't move in unison
+      flash: 0,                // trigger flash (decays per frame)
     };
   }
 
@@ -1577,9 +1583,9 @@ function onEvent(e) {
       for (const id of Object.keys(portals3d)) {
         const pt = portals3d[id];
         pt.flash = 1;
-        SFX.playZap([pt.x, 2.0, pt.z]);
+        SFX.playZap([pt.x, (pt.y || 0) + 2.0, pt.z]); // whoosh at each doorway's own floor level
       }
-      addFeedLine(`PORTAL ${e.p} → PORTAL ${e.p === 'A' ? 'B' : 'A'} TELEPORT`, 'feed-btn');
+      addFeedLine(`PORTAL ${e.p} → PORTAL ${e.q || (e.p === 'A' ? 'B' : 'A')} TELEPORT`, 'feed-btn');
       break;
     }
     case 'hit': {

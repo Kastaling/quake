@@ -198,28 +198,44 @@ for (let i = 0; i < 12; i++) {
 }
 
 /* --- Linked portal teleporters ---------------------------------------------- */
-// Paired doorway entities: walking into Portal A instantly translates the player
-// (position + momentum vector) out of Portal B, and vice versa. Rockets and
-// grenades also travel through them (see checkProjectilePortals). `axis` is the
-// doorway's normal axis ('x' or 'z'); `dir` points from the doorway INTO the
-// arena — the portal's forward normal, i.e. out of its FRONT face. `yaw` is that
-// same facing in player-aim convention (forward = [-sin(yaw), 0, -cos(yaw)]);
-// hop exit transforms use (dest.yaw - src.yaw + PI) so entities emerge moving
-// forward OUT of the destination portal's front face. The 0.5 s per-player
-// cooldown prevents instant re-trigger loops if an exit ever overlaps another
-// trigger zone. Positions are scaled 0.75x to sit on open floor inside the
-// midground +/-60 perimeter.
+// Paired doorway entities: walking into one portal instantly translates the
+// player (position + momentum vector) out of its paired portal, and vice versa.
+// Rockets and grenades also travel through them (see checkProjectilePortals).
+// `axis` is the doorway's normal axis ('x' or 'z'); `dir` points from the
+// doorway INTO the arena — the portal's forward normal, i.e. out of its FRONT
+// face; `y` is the floor level the doorway stands on (0 = ground floor,
+// MEZZ_TOP = open second-floor deck). Exit placement preserves height above
+// local ground at entry and re-anchors it to the destination's local ground
+// (groundHeightAt), so hops between different floor levels land smoothly.
+// `yaw` is that same facing in player-aim convention (forward = [-sin(yaw), 0,
+// -cos(yaw)]); hop exit transforms use (dest.yaw - src.yaw + PI) so entities
+// emerge moving forward OUT of the destination portal's front face. The 0.5 s
+// per-player cooldown prevents instant re-trigger loops if an exit ever
+// overlaps another trigger zone. Trigger zones are XZ-only slabs: deck-level
+// doorways sit fully inside the mezzanine footprint (walls block anything with
+// feet below MEZZ_TOP - STEP), so only entities at deck level can reach them,
+// while ground doorways sit on open floor outside it. Positions are scaled 0.75x
+// to sit on open floor inside the midground +/-60 perimeter.
 const PORTAL_CD = 0.5;                // seconds before a player may teleport again
 const PORTALS = [
-  { id: 'A', x: -54, z: -25.5, axis: 'x', dir: 1 },   // west flank doorway, faces +X into the arena
-  { id: 'B', x:  54, z:  25.5, axis: 'x', dir: -1 },  // east flank doorway, faces -X into the arena
+  { id: 'A', x: -54, z: -25.5, y: 0, axis: 'x', dir: 1 },    // west flank doorway (ground), faces +X into the arena
+  { id: 'B', x:  54, z:  25.5, y: 0, axis: 'x', dir: -1 },   // east flank doorway (ground), faces -X into the arena
+  // Pair 3 — ground floor <-> second floor: brackets the east access-ramp mouth;
+  // C on open floor just past the ramp's ground end, D on the deck at its face.
+  { id: 'C', x: -8, z: -27, y: 0, axis: 'x', dir: 1 },       // ground doorway east of ramp A base, faces +X (east)
+  { id: 'D', x: -24, z: -27, y: MEZZ_TOP, axis: 'x', dir: -1 }, // deck doorway at the ramp mouth, faces -X (west) into the deck
+  // Pair 4 — second floor <-> second floor: north/south ends of the mezzanine
+  // deck; both doorways sit fully inside the footprint so only deck-level
+  // entities can trigger them.
+  { id: 'E', x: -31, z: -34, y: MEZZ_TOP, axis: 'z', dir: 1 },  // north end of the deck, faces +Z (south) into the deck
+  { id: 'F', x: -31, z: -20, y: MEZZ_TOP, axis: 'z', dir: -1 }, // south end of the deck, faces -Z (north) into the deck
 ];
 // Facing yaw per portal (player-aim convention), derived from axis/dir so it can
 // never drift out of sync with the forward normal used for exit positions.
 for (const pt of PORTALS) {
   pt.yaw = pt.axis === 'x' ? (pt.dir > 0 ? -Math.PI / 2 : Math.PI / 2) : (pt.dir > 0 ? Math.PI : 0);
 }
-const PORTAL_PAIR = { A: 'B', B: 'A' };
+const PORTAL_PAIR = { A: 'B', B: 'A', C: 'D', D: 'C', E: 'F', F: 'E' };
 
 /* ============================== WORLD STATE ================================= */
 
@@ -474,7 +490,7 @@ function checkPortals(p) {
       p.input.yaw += dyaw;
       checkGround(p);
       p.portalCd = PORTAL_CD;
-      emitEvent({ t: 'portal', p: pt.id, who: p.id, dyaw });   // client flashes + rotates its own camera
+      emitEvent({ t: 'portal', p: pt.id, q: exit.id, who: p.id, dyaw });   // client flashes both ends + rotates its own camera
       return;
     }
   }
@@ -1158,7 +1174,9 @@ function buildInit(p) {
         [RAMP_B_CX, RAMP_B_MIN_Z, RAMP_B_CX, RAMP_B_MAX_Z, RAMP2_W],   // south approach
       ],
       buttons: BUTTONS.map((b) => ({ id: b.id, x: b.x, y: b.y, z: b.z, r: b.r })),
-      portals: PORTALS.map((pt) => ({ id: pt.id, x: pt.x, z: pt.z, axis: pt.axis, dir: pt.dir })),
+      // y = the doorway's floor level (0 ground / MEZZ_TOP deck) so the client
+      // renders second-floor doorways standing on the rendered deck roof.
+      portals: PORTALS.map((pt) => ({ id: pt.id, x: pt.x, z: pt.z, y: pt.y, axis: pt.axis, dir: pt.dir })),
       pickups: PICKUPS.map((k) => [k.id, k.kind, k.x, k.y, k.z]),
     },
     weapons: WEAPONS.map((w) => ({ id: w.id, name: w.name, auto: w.auto, rate: w.rate, dmg: w.dmg, ammo: w.ammo, maxAmmo: w.maxAmmo })),
