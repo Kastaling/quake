@@ -59,8 +59,13 @@ const el = {
   chatInput: document.getElementById('chat-input'),
 };
 
-const WEAPON_SHORT = ['AR', 'SGT', 'SSG', 'GL', 'RL', 'LG', 'RG'];
-const AMMO_POOL_IDX = [0, 1, 1, 2, 3, 4, 5]; // rifle, shells, shells, nades, rockets, cells, rail
+// Weapon order mirrors the server WEAPONS array (index-stable): 0=AR 1=SGT 2=SSG
+// 3=GL 4=RL 5=LG 6=RG 7=NGL. The Nailgun is appended last so every existing index
+// (rocket=4, lightning=5, railgun=6) — used by projectile-kind + LG-beam logic — holds.
+const WEAPON_SHORT = ['AR', 'SGT', 'SSG', 'GL', 'RL', 'LG', 'RG', 'NGL'];
+// pool index into the ammo array [rifle, shells, nades, rockets, cells, rail, nails]
+// (weapons 1 & 2 both draw from the shared 'shells' pool — keep the duplicate)
+const AMMO_POOL_IDX = [0, 1, 1, 2, 3, 4, 5, 6]; // rifle, shells, shells, nades, rockets, cells, rail, nails
 
 /* ============================== GAME STATE ================================= */
 
@@ -182,6 +187,7 @@ const MAT = {
   ammoCrate: new THREE.MeshLambertMaterial({ color: 0xd69e2e, emissive: 0x3a2a08 }),
   rocket: new THREE.MeshBasicMaterial({ color: 0xff7b24 }),
   grenade: new THREE.MeshBasicMaterial({ color: 0xa8e05f }),
+  nail: new THREE.MeshBasicMaterial({ color: 0xdfe8ff }),   // bright steel sliver (nailgun)
   trail: new THREE.LineBasicMaterial({ color: 0xff9a3c, transparent: true, opacity: 0.6 }),
 };
 
@@ -466,20 +472,25 @@ function makeZombieMesh(typeIdx) {
 
 function makeProjectileMesh(kind) {
   const isRocket = kind === 'rocket';
-  const mesh = new THREE.Mesh(
-    new THREE.SphereGeometry(isRocket ? 0.17 : 0.14, 12, 10),
-    isRocket ? MAT.rocket : MAT.grenade);
+  const isNail = kind === 'nail';
+  // nails are tiny bright steel slivers; rockets fat orange spheres; grenades green orbs
+  const radius = isRocket ? 0.17 : isNail ? 0.06 : 0.14;
+  const mat = isRocket ? MAT.rocket : isNail ? MAT.nail : MAT.grenade;
+  const mesh = new THREE.Mesh(new THREE.SphereGeometry(radius, 12, 10), mat);
   scene.add(mesh);
 
-  // short fading trail line (history of recent positions)
+  // short fading trail line (history of recent positions) — nails get a pale steel streak
   const N = 8;
   const pos = new Float32Array(N * 3);
   const geo = new THREE.BufferGeometry();
   geo.setAttribute('position', new THREE.BufferAttribute(pos, 3));
-  const trail = new THREE.Line(geo, MAT.trail.clone());
+  const trailMat = isNail
+    ? new THREE.LineBasicMaterial({ color: 0xbcd4ff, transparent: true, opacity: 0.5 })
+    : MAT.trail.clone();
+  const trail = new THREE.Line(geo, trailMat);
   scene.add(trail);
 
-  return { mesh, trail, kind: isRocket ? 'rocket' : 'grenade', hist: [] };
+  return { mesh, trail, kind, hist: [] };
 }
 
 /* ============================== INTERPOLATION ============================== */
@@ -1042,6 +1053,24 @@ function buildViewmodel(idx) {
       g.add(core);
       break;
     }
+    case 7: { // nailgun (wooden stock + twin dark-metal barrels)
+      const wood = new THREE.MeshLambertMaterial({ color: 0x6b4a2b });
+      const barrelMat = new THREE.MeshLambertMaterial({ color: 0x1c2027 });
+      // wooden stock / receiver body
+      addBox(0.1, 0.13, 0.5, 0, -0.04, 0.05, wood);
+      // twin dark metal barrels side by side (the rapid-fire signature)
+      const bGeo = new THREE.CylinderGeometry(0.028, 0.028, 0.62, 10);
+      for (const dx of [-0.045, 0.045]) {
+        const b = new THREE.Mesh(bGeo, barrelMat);
+        b.rotation.x = Math.PI / 2;
+        b.position.set(dx, 0.03, -0.32);
+        g.add(b);
+      }
+      // muzzle band tying the barrels together + a small foregrip
+      addBox(0.12, 0.06, 0.08, 0, 0.03, -0.55, barrelMat);
+      addBox(0.07, 0.14, 0.09, 0, -0.13, -0.12, wood);
+      break;
+    }
   }
 
   // muzzle flash sprite (hidden until firing)
@@ -1118,8 +1147,9 @@ function updateHUD() {
   if (el.speedNum) el.speedNum.textContent = String(Math.round(selfSpeed));
 
   // ammo for the current weapon (server-authoritative counts)
+  // pool order: rifle(10), shells(11), nades(12), rockets(13), cells(14), rail(15), nails(17)
   const poolIdx = AMMO_POOL_IDX[weaponIdx];
-  const ammoVal = [self[10], self[11], self[12], self[13], self[14], self[15]][poolIdx];
+  const ammoVal = [self[10], self[11], self[12], self[13], self[14], self[15], self[17]][poolIdx];
   el.ammoNum.textContent = String(ammoVal);
   el.wpnName.textContent = weaponDefs[weaponIdx] ? weaponDefs[weaponIdx].name.toUpperCase() : '';
 
@@ -1128,7 +1158,7 @@ function updateHUD() {
     const slot = document.getElementById(`wpnSlot${i}`);
     if (!slot) continue;
     slot.classList.toggle('selected', i === weaponIdx);
-    const a = [self[10], self[11], self[12], self[13], self[14], self[15]][AMMO_POOL_IDX[i]];
+    const a = [self[10], self[11], self[12], self[13], self[14], self[15], self[17]][AMMO_POOL_IDX[i]];
     document.getElementById(`wAmmo${i}`).textContent = String(a);
   }
 
@@ -1223,7 +1253,7 @@ document.addEventListener('keydown', (e) => {
 
   keys[e.code] = true;
   if (e.code === 'Space') e.preventDefault();
-  const digit = ['Digit1', 'Digit2', 'Digit3', 'Digit4', 'Digit5', 'Digit6', 'Digit7']
+  const digit = ['Digit1', 'Digit2', 'Digit3', 'Digit4', 'Digit5', 'Digit6', 'Digit7', 'Digit8']
     .indexOf(e.code);
   if (digit >= 0) switchWeapon(digit);
 });
@@ -1407,6 +1437,16 @@ function onEvent(e) {
       SFX.playExplosion([e.x, e.y, e.z]);
       spawnExplosionVisual(e);
       break;
+    case 'nailhit': {
+      // tiny impact spark where a nail struck — one cheap fading sphere (the nailgun
+      // fires ~10/s, so this must stay lightweight: no particle burst, no light)
+      const spark = new THREE.Mesh(new THREE.SphereGeometry(0.08, 6, 5),
+        new THREE.MeshBasicMaterial({ color: 0xcfe0ff, transparent: true, opacity: 0.9 }));
+      spark.position.set(e.x, e.y, e.z);
+      scene.add(spark);
+      booms.push({ mesh: spark, light: null, t: 0, dur: 0.1, r: 0.4, grow: true });
+      break;
+    }
     case 'button': {
       const b = button3d[e.which];
       if (b) {
@@ -1592,7 +1632,7 @@ function updateEntities(now, dt) {
   const seenPr = new Set();
   for (const e of latestState.pr) {
     seenPr.add(e[0]);
-    const kind = e[4] === 4 ? 'rocket' : 'grenade'; // weapon index: 3=grenade, 4=rocket
+    const kind = e[4] === 4 ? 'rocket' : e[4] === 7 ? 'nail' : 'grenade'; // weapon idx: 3=grenade, 4=rocket, 7=nailgun
     let pr = projectiles3d.get(e[0]);
     if (!pr || pr.kind !== kind) {
       if (pr) removeProjectileMesh(e[0]);

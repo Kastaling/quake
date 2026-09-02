@@ -78,8 +78,15 @@ const WEAPONS = [
   { id: 'rocket',    name: 'Rocket Launcher',  kind: 'projectile', auto: false, rate: 1.20, projSpeed: 30, gravity: false, dmg: 85, blastR: 9, impulse: 30, ammo: 'rockets', maxAmmo: 8 },
   { id: 'lightning', name: 'Lightning Gun',    kind: 'hitscan',    auto: true,  rate: 0.06, dmg: 5,   pellets: 1, spread: 0.030, range: 90,  ammo: 'cells',   maxAmmo: 200 },
   { id: 'railgun',   name: 'Railgun',          kind: 'rail',       auto: false, rate: 1.40, dmg: 130, pellets: 1, spread: 0,     range: 220, ammo: 'rail',    maxAmmo: 8 },
+  // Quake Nailgun: rapid twin-barrel projectile shooter (auto, ~100 ms interval).
+  // Appended LAST so every existing weapon index stays stable (rocket=4, lightning=5,
+  // railgun=6) — the client maps projectile kind and the LG beam by those indices.
+  { id: 'nail',      name: 'Nailgun',          kind: 'projectile', auto: true,  rate: 0.10, projSpeed: 55, gravity: false, dmg: 9, blastR: 0, impulse: 0, ammo: 'nails', maxAmmo: 64 },
 ];
-const AMMO_MAX = { rifle: 96, shells: 24, nades: 8, rockets: 8, cells: 200, rail: 8 };
+const AMMO_MAX = { rifle: 96, shells: 24, nades: 8, rockets: 8, cells: 200, rail: 8, nails: 64 };
+
+/* --- Grenade fuse / bounce tuning ------------------------------------------- */
+const GRENADE_FUSE = 2.5;             // seconds before a grenade detonates on its own timer
 
 /* --- Buttons ---------------------------------------------------------------- */
 const NUKE_CD = 30;                   // seconds until the Nuke button re-arms
@@ -519,22 +526,63 @@ function updateProjectiles(dt) {
   for (let i = projectiles.length - 1; i >= 0; i--) {
     const pr = projectiles[i];
     pr.age += dt;
+    const w = WEAPONS[pr.wi];
+
+    // --- Nailgun nails: fast straight darts, direct-hit damage, no radial blast ---
+    if (w.id === 'nail') { stepNail(pr, i, dt); continue; }
+
     if (pr.gravity) pr.vy -= GRAVITY * 0.55 * dt;   // grenades arc, rockets fly straight
     pr.x += pr.vx * dt;
     pr.y += pr.vy * dt;
     pr.z += pr.vz * dt;
 
+    const isGrenade = w.id === 'grenade';
     let boom = false;
 
-    // ground / ramp impact
+    // ground / ramp impact: grenades bounce + roll (restitution) instead of detonating,
+    // rockets still explode on contact.
     const gh = groundHeightAt(pr.x, pr.z);
-    if (pr.y <= gh + 0.12) { pr.y = gh + 0.15; boom = true; }
+    if (pr.y <= gh + 0.12) {
+      if (isGrenade && pr.age < GRENADE_FUSE) {
+        pr.y = gh + 0.15;
+        if (pr.vy < -0.5) {                 // falling onto the surface: bounce
+          pr.vy = -pr.vy * 0.45;            //   restitution on the vertical axis
+          pr.vx *= 0.75;                    //   dampen horizontal velocity
+          pr.vz *= 0.75;
+        } else if (Math.abs(pr.vy) < 1.0) {
+          pr.vy = 0;                        //   settled: roll along the surface
+        }
+        const fr = Math.max(0, 1 - 2.5 * dt); // rolling friction while in ground contact
+        pr.vx *= fr; pr.vz *= fr;
+      } else { boom = true; }
+    }
 
-    // solid wall impact
+    // solid wall impact: grenades reflect off the nearest face and keep rolling,
+    // rockets detonate on contact.
     for (const s of SOLIDS) {
       if (pr.x > s.minX - 0.1 && pr.x < s.maxX + 0.1 &&
           pr.z > s.minZ - 0.1 && pr.z < s.maxZ + 0.1 &&
-          pr.y < s.top + 0.1) { boom = true; break; }
+          pr.y < s.top + 0.1) {
+        if (isGrenade && pr.age < GRENADE_FUSE) {
+          const dxMin = pr.x - (s.minX - 0.1), dxMax = (s.maxX + 0.1) - pr.x;
+          const dzMin = pr.z - (s.minZ - 0.1), dzMax = (s.maxZ + 0.1) - pr.z;
+          const m = Math.min(dxMin, dxMax, dzMin, dzMax); // nearest penetrated face
+          if (m === dxMin)      { pr.x = s.minX - 0.15; pr.vx = -pr.vx * 0.45; }
+          else if (m === dxMax) { pr.x = s.maxX + 0.15; pr.vx = -pr.vx * 0.45; }
+          else if (m === dzMin) { pr.z = s.minZ - 0.15; pr.vz = -pr.vz * 0.45; }
+          else                  { pr.z = s.maxZ + 0.15; pr.vz = -pr.vz * 0.45; }
+          pr.vx *= 0.75; pr.vz *= 0.75;      // lose energy on the bounce
+        } else boom = true;
+        break;
+      }
+    }
+
+    // direct-impact detonation: a grenade that strikes a zombie directly explodes now
+    if (!boom && isGrenade) {
+      for (const z of zombies.values()) {
+        const d = Math.hypot(z.x - pr.x, (z.y + 0.85) - pr.y, z.z - pr.z);
+        if (d < z.r + 0.35) { boom = true; break; }
+      }
     }
 
     // arena bounds / sky
@@ -546,20 +594,62 @@ function updateProjectiles(dt) {
       if (d < b.r + 0.35) { triggerButton(b.id, pr.owner); boom = true; }
     }
 
-    // owner collision after a short fuse (enables self rocket-jumps)
+    // owner collision after a short fuse (enables self rocket-jumps / grenade jumps)
     const op = players.get(pr.owner);
     if (op && !op.dead && pr.age > 0.22) {
       const d = Math.hypot(op.x - pr.x, (op.y + 0.9) - pr.y, op.z - pr.z);
       if (d < 0.75) boom = true;
     }
 
-    // max lifetime safety
-    if (pr.age > 6) boom = true;
+    // timed fuse detonation (grenades) / max lifetime safety (rockets)
+    if ((isGrenade && pr.age >= GRENADE_FUSE) || (!isGrenade && pr.age > 6)) boom = true;
 
     if (boom) {
       projectiles.splice(i, 1);
       explode(pr.x, pr.y, pr.z, pr.blastR, pr.dmg, pr.impulse, pr.owner);
     }
+  }
+}
+
+/**
+ * Nailgun nail: a fast straight-line dart. It deals direct impact damage to the first
+ * zombie (or other player) it touches and is stopped by walls/ground — no radial blast.
+ * The shooter's own nails never self-damage (standard Quake behavior).
+ */
+function stepNail(pr, idx, dt) {
+  pr.x += pr.vx * dt;
+  pr.y += pr.vy * dt;
+  pr.z += pr.vz * dt;
+
+  let hit = false;
+
+  // zombies are the primary target (direct impact damage per nail)
+  for (const z of zombies.values()) {
+    const d = Math.hypot(z.x - pr.x, (z.y + 0.85) - pr.y, z.z - pr.z);
+    if (d < z.r + 0.2) { damageZombie(z, pr.dmg, pr.owner); hit = true; break; }
+  }
+
+  // other players (skip the owner so your own nails never hurt you)
+  if (!hit) for (const p of players.values()) {
+    if (p.id === pr.owner || p.dead) continue;
+    const d = Math.hypot(p.x - pr.x, (p.y + 0.9) - pr.y, p.z - pr.z);
+    if (d < 0.82) { damagePlayer(p, pr.dmg, pr.owner); hit = true; break; }
+  }
+
+  // solid walls stop the nail
+  if (!hit) for (const s of SOLIDS) {
+    if (pr.x > s.minX && pr.x < s.maxX && pr.z > s.minZ && pr.z < s.maxZ && pr.y < s.top) { hit = true; break; }
+  }
+
+  // ground / arena bounds / max lifetime safety
+  const gh = groundHeightAt(pr.x, pr.z);
+  if (pr.y <= gh + 0.1) hit = true;
+  if (Math.abs(pr.x) > ARENA_HALF || Math.abs(pr.z) > ARENA_HALF || pr.y > 70) hit = true;
+  if (pr.age > 2) hit = true;
+
+  if (hit) {
+    projectiles.splice(idx, 1);
+    emitEvent({ t: 'nailhit', x: r2(pr.x), y: r2(pr.y), z: r2(pr.z) }); // small impact spark on the client
   }
 }
 
@@ -881,12 +971,13 @@ function emitEvent(e) { io.emit('event', e); }
 /** Compact world snapshot, broadcast at 30 Hz. Arrays keep payloads small. */
 function buildSnapshot() {
   // player entry layout: [id, x, y, z, yaw, pitch, hp, weapon, dead, respawnT,
-  //                       rifle, shells, nades, rockets, cells, rail, name]
+  //                       rifle, shells, nades, rockets, cells, rail, name, nails]
+  // (nails is appended LAST so every existing index — incl. name at 16 — stays stable)
   const p = [];
   for (const pl of players.values()) {
     p.push([pl.id, r2(pl.x), r2(pl.y), r2(pl.z), r3(pl.input.yaw), r3(pl.input.pitch),
       Math.max(0, Math.round(pl.hp)), pl.weapon, pl.dead ? 1 : 0, r1(Math.max(0, pl.respawnT)),
-      pl.ammo.rifle, pl.ammo.shells, pl.ammo.nades, pl.ammo.rockets, pl.ammo.cells, pl.ammo.rail, pl.name]);
+      pl.ammo.rifle, pl.ammo.shells, pl.ammo.nades, pl.ammo.rockets, pl.ammo.cells, pl.ammo.rail, pl.name, pl.ammo.nails]);
   }
   const z = [];
   for (const zz of zombies.values()) {

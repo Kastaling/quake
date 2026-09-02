@@ -171,6 +171,12 @@ const SFX = (() => {
         tone(dest, { wave: 'sine', f0: 1900, f1: 850, dur: 0.13, vol: local ? 0.34 : 0.26 });
         noiseBurst(dest, { type: 'bandpass', f0: 2500, q: 6, dur: 0.08, vol: 0.2 });
         break;
+      case 'nail':
+        // rapid-fire "tack": short high click + tiny metallic ping (kept quiet so the
+        // ~10 rounds/sec rattle reads as a machine rather than a wall of noise)
+        noiseBurst(dest, { type: 'highpass', f0: 3500, dur: 0.02, vol: local ? 0.14 : 0.1 });
+        tone(dest, { wave: 'square', f0: 1600, f1: 900, dur: 0.03, vol: local ? 0.12 : 0.08 });
+        break;
       default:
         tone(dest, { wave: 'square', f0: 700, f1: 200, dur: 0.06, vol: 0.2 });
     }
