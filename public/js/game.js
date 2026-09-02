@@ -90,6 +90,9 @@ let button3d = {};             // 'nuke' | 'inhibit' -> { group, fill, dome, lig
 // Each pair glows in its own distinct neon color (from init.map.portals[].color) so
 // players can identify linked doorways at a glance.
 const portals3d = {};
+// Jump pads (aerial access to N2/N3): id -> { group, disc, ring, light, phase, flash }.
+// Pure presentation at init.map.jumpPads positions — the server owns trigger + impulse.
+const jumpPads3d = {};
 
 /* --- snapshot interpolation buffer ------------------------------------------ */
 // Buffers are namespaced PER ENTITY TYPE ('p:<id>', 'z:<id>', 'pr:<id>'). Player,
@@ -498,6 +501,56 @@ function buildWorld(map) {
       group, field, core, light, x: pt.x, y: pt.y || 0, z: pt.z,
       phase: pi * Math.PI / 3, // stagger each doorway's breathing pulse so they don't move in unison
       flash: 0,                // trigger flash (decays per frame)
+    };
+  }
+
+  // jump pads: low-profile hexagonal launchers on open floor with pulsing neon-
+  // green borders. Pure presentation at the init.map.jumpPads positions — the
+  // server owns the trigger + impulse (checkJumpPads). Each pad is a flat hex
+  // prism base, an additive energy disc and a bright hex border line that pulse
+  // in the frame loop; launch flashes ride the 'jumpPad' event.
+  const jumpPadList = map.jumpPads || [];
+  for (let ji = 0; ji < jumpPadList.length; ji++) {
+    const jp = jumpPadList[ji];
+    const r = typeof jp.r === 'number' ? jp.r : 2.0;
+    const group = new THREE.Group();
+
+    // flat hex prism base (low profile: ~0.18 thick, top just above the floor)
+    const base = new THREE.Mesh(
+      new THREE.CylinderGeometry(r * 0.95, r, 0.18, 6),
+      new THREE.MeshLambertMaterial({ color: 0x14231a, emissive: 0x0c2e18 }));
+    base.position.y = 0.1;   // sits on the floor (group origin at pad center)
+    group.add(base);
+
+    // additive energy disc inside the border — reads as a charged field, not a wall
+    const discMat = new THREE.MeshBasicMaterial({ color: 0x39ff8a, transparent: true, opacity: 0.45, blending: THREE.AdditiveBlending, side: THREE.DoubleSide, depthWrite: false });
+    const disc = new THREE.Mesh(new THREE.CircleGeometry(r * 0.72, 6), discMat);
+    disc.rotation.x = -Math.PI / 2;   // face up (hexagon matches the base)
+    disc.position.y = 0.21;           // just above the base top — no z-fight with the floor
+    group.add(disc);
+
+    // pulsing neon-green hex border: line loop on the base rim (same corner angles
+    // as the cylinder's default thetaStart=0 so it sits exactly on the edge)
+    const ringPts = [];
+    for (let k = 0; k < 6; k++) {
+      const a = (k / 6) * Math.PI * 2;
+      ringPts.push(new THREE.Vector3(Math.cos(a) * r * 0.97, 0.24, Math.sin(a) * r * 0.97));
+    }
+    const ring = new THREE.LineLoop(
+      new THREE.BufferGeometry().setFromPoints(ringPts),
+      new THREE.LineBasicMaterial({ color: 0x5fff9e, transparent: true, opacity: 0.9 }));
+    group.add(ring);
+
+    const light = new THREE.PointLight(0x39ff8a, 1.2, 14);   // green glow spilling onto the floor
+    light.position.set(0, 0.7, 0);
+    group.add(light);
+
+    group.position.set(jp.x, jp.y || 0, jp.z);
+    scene.add(group);
+    jumpPads3d[jp.id] = {
+      group, disc: discMat, ring, light, x: jp.x, y: jp.y || 0, z: jp.z,
+      phase: ji * Math.PI / 2.5, // stagger each pad's pulse so they don't move in unison
+      flash: 0,                  // launch flash (decays per frame)
     };
   }
 
@@ -1043,6 +1096,23 @@ function spawnPoof(x, y, z, color) {
       mesh: m,
       vx: (Math.random() - 0.5) * 4, vy: 2 + Math.random() * 4, vz: (Math.random() - 0.5) * 4,
       life: 0.5, maxLife: 0.5,
+    });
+  }
+}
+
+/** Upward green particle burst for a jump-pad launch (rises first; debris gravity takes over). */
+function spawnPadBurst(x, y, z) {
+  for (let i = 0; i < 18; i++) {
+    const m = new THREE.Mesh(new THREE.BoxGeometry(0.12, 0.12, 0.12),
+      new THREE.MeshBasicMaterial({ color: Math.random() > 0.35 ? 0x39ff8a : 0xc8ffe0, transparent: true }));
+    m.position.set(x + (Math.random() - 0.5) * 1.6, y + 0.25 + Math.random() * 0.4, z + (Math.random() - 0.5) * 1.6);
+    scene.add(m);
+    const a = Math.random() * Math.PI * 2;
+    const sp = 1 + Math.random() * 3.5;
+    particles.push({
+      mesh: m,
+      vx: Math.cos(a) * sp, vy: 9 + Math.random() * 10, vz: Math.sin(a) * sp,
+      life: 0.8, maxLife: 0.8,
     });
   }
 }
@@ -1634,6 +1704,16 @@ function onEvent(e) {
       addFeedLine(`PORTAL ${e.p} → PORTAL ${e.q || (e.p === 'A' ? 'B' : 'A')} TELEPORT`, 'feed-btn');
       break;
     }
+    case 'jumpPad': {
+      // A player just launched off a jump pad: green particle burst + positional
+      // launch whoosh at the pad, and a bright flash on that pad's border. The
+      // velocity change itself is server-authoritative — positions arrive via snapshots.
+      const jp = jumpPads3d[e.id];
+      if (jp) jp.flash = 1;
+      spawnPadBurst(e.x, e.y, e.z);
+      SFX.playShot('rocket', [e.x, e.y + 0.4, e.z], false); // positional launch whoosh
+      break;
+    }
     case 'hit': {
       // small spark where a zombie took damage (position from its mesh)
       const z = zombies3d.get(e.id);
@@ -1886,6 +1966,18 @@ function updateEntities(now, dt) {
     const sw = 1 + 0.025 * Math.sin(now * 3.1 + pt.phase); // subtle field shimmer
     pt.field.scale.set(sw, 1 + 0.02 * Math.cos(now * 2.7 + pt.phase), 1);
     pt.light.intensity += ((1.4 + 0.5 * Math.sin(now * 5.2 + pt.phase) + pt.flash * 6) - pt.light.intensity) * 0.15;
+  }
+
+  // --- jump pads: pulsing neon-green border + launch flash --------------------------
+  for (const id of Object.keys(jumpPads3d)) {
+    const jp = jumpPads3d[id];
+    if (jp.flash > 0) jp.flash = Math.max(0, jp.flash - dt * 2.5); // decay after a launch
+    const pulse = 0.5 + 0.5 * Math.sin(now * 4.2 + jp.phase);      // 0..1 breathing cycle
+    jp.ring.material.opacity = Math.min(1, 0.45 + 0.45 * pulse + jp.flash * 0.55);
+    jp.disc.opacity = Math.min(1, 0.3 + 0.25 * pulse + jp.flash * 0.7);
+    const rs = 1 + 0.03 * Math.sin(now * 4.2 + jp.phase) + jp.flash * 0.12; // border shimmer
+    jp.ring.scale.set(rs, 1, rs);
+    jp.light.intensity += ((1.0 + 0.7 * pulse + jp.flash * 9) - jp.light.intensity) * 0.15;
   }
 
   // --- viewmodel (bob driven by the snapshot-derived speed estimate) ---------------

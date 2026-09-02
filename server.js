@@ -123,6 +123,19 @@ function inWalkwayXZ(x, z, w) {
   return Math.abs(lx) <= w.len / 2 && Math.abs(lz) <= WALK_W / 2;
 }
 
+/* --- Jump pads: aerial access to nodes N2 and N3 ----------------------------- */
+// Low-profile launchers on open floor that fling anything standing on them into a
+// high arc toward their target node — the only way up to N2/N3 besides the portal
+// links. The server is authoritative for trigger + impulse (checkJumpPads); the
+// client renders the pad meshes from init.map.jumpPads at these same positions.
+const JUMP_PADS = [
+  { id: 'jp1', x: 25, y: 0, z: -25, ix: -8, iy: 18, iz: 12 },   // launches toward node N2 (southwest)
+  { id: 'jp2', x: 0,  y: 0, z: 40,  ix: -12, iy: 18, iz: -16 }, // launches toward node N3 (east)
+];
+const JUMP_PAD_RADIUS = 2.0;    // trigger radius around each pad center (u)
+const JUMP_PAD_LOCKOUT = 0.35;  // s of air-control lockout after a player launch
+const JUMP_PAD_NADE_BUMP = 12;  // upward vy bump for grenades entering the pad radius
+
 /* --- Single outer access ramp: ground floor -> node N1 ----------------------- */
 // The ONLY ramp in the arena. It sits on open floor OUTSIDE the upper platform
 // triangle — nothing slopes inward toward or over the central button platform,
@@ -451,6 +464,10 @@ function updatePlayerPhysics(p, dt) {
   // orientation comes from the latest client input (authoritative aim/turning)
   const sy = Math.sin(inp.yaw), cy = Math.cos(inp.yaw);
 
+  // jump-pad launch lockout: no air steering for JUMP_PAD_LOCKOUT seconds after a
+  // pad flings you — the impulse arc plays out before control returns.
+  if (p.airControlLockout > 0) p.airControlLockout = Math.max(0, p.airControlLockout - dt);
+
   // wish direction from forward/strafe input (matches client camera convention)
   let wx = -sy * inp.f + cy * inp.s;
   let wz = -cy * inp.f - sy * inp.s;
@@ -472,7 +489,8 @@ function updatePlayerPhysics(p, dt) {
   // point where the velocity component along the facing reaches MAXWALK. Total
   // speed is never capped in the air — turning while strafing keeps that
   // component low so each tick adds more -> classic air strafe / bhop build-up.
-  if (wl > 0.01) {
+  // Suppressed entirely while a jump-pad launch lockout is active (no steering).
+  if (wl > 0.01 && !(p.airControlLockout > 0)) {
     const curDot = p.vx * wx + p.vz * wz;
     if (curDot < MAXWALK) {
       const accel = (p.onGround ? ACCEL_GROUND : ACCEL_AIR);
@@ -519,6 +537,35 @@ function updatePlayerPhysics(p, dt) {
     }
   } else {
     p.onGround = false;
+  }
+}
+
+/* ============================== JUMP PADS ================================== */
+
+/**
+ * Jump-pad launchers (aerial access to nodes N2/N3): if a player's feet are
+ * within JUMP_PAD_RADIUS of a pad center at pad level, their velocity is SET to
+ * the pad's impulse vector — a deterministic launch toward the target node that
+ * is idempotent while they linger in the zone (no stacking) — and air control
+ * locks out for JUMP_PAD_LOCKOUT seconds so the arc plays out before steering
+ * returns. The vertical gate keeps players flying over the open decks above from
+ * triggering ground-level pads, and a short per-player padCd blocks an immediate
+ * re-trigger on the way back down (the launch arc exits the zone well before
+ * descent). A 'jumpPad' event rides out to every client for the launch VFX/audio.
+ */
+function checkJumpPads(p) {
+  if (p.padCd > 0) return;
+  for (const j of JUMP_PADS) {
+    const dx = p.x - j.x, dz = p.z - j.z;
+    if (dx * dx + dz * dz > JUMP_PAD_RADIUS * JUMP_PAD_RADIUS) continue;
+    const dyv = p.y - j.y;
+    if (dyv < 0 || dyv > 1.2) continue;   // vertical gate: pad-level entities only
+    p.vx = j.ix; p.vy = j.iy; p.vz = j.iz;
+    p.onGround = false;
+    p.airControlLockout = JUMP_PAD_LOCKOUT;
+    p.padCd = 0.5;                        // re-trigger guard (see above)
+    emitEvent({ t: 'jumpPad', id: j.id, x: r2(j.x), y: r2(j.y + 0.3), z: r2(j.z), who: p.id });
+    return;   // one pad per tick (the pads are far apart anyway)
   }
 }
 
@@ -738,7 +785,7 @@ function fireWeapon(p, w) {
 
   if (w.kind === 'projectile') {
     projectiles.push({
-      id: nextId.proj++, wi: WEAPONS.indexOf(w), owner: p.id, age: 0, portalCd: 0,
+      id: nextId.proj++, wi: WEAPONS.indexOf(w), owner: p.id, age: 0, portalCd: 0, padCd: 0,
       // muzzle offset along the aim vector; y uses a shorter reach so a rocket
       // fired straight down still takes ~3 ticks to hit the floor — long enough
       // for a moving shooter to pull ahead of it (the lag that makes rjumps work)
@@ -898,6 +945,23 @@ function updateProjectiles(dt) {
 
     const isGrenade = w.id === 'grenade';
     let boom = false;
+
+    // jump pads: a grenade entering a pad radius gets an upward velocity bump so a
+    // lobbed nade arcs over cover. A short per-projectile guard blocks re-bumps
+    // while a slow-rolling grenade lingers in the zone (rockets are unaffected).
+    if (isGrenade) {
+      if (pr.padCd > 0) pr.padCd = Math.max(0, pr.padCd - dt);
+      else {
+        for (const j of JUMP_PADS) {
+          const dx = pr.x - j.x, dz = pr.z - j.z;
+          if (dx * dx + dz * dz <= JUMP_PAD_RADIUS * JUMP_PAD_RADIUS && pr.y - j.y <= 2.0) {
+            pr.vy += JUMP_PAD_NADE_BUMP;
+            pr.padCd = 0.5;
+            break;
+          }
+        }
+      }
+    }
 
     // ground / ramp impact: grenades bounce + roll (restitution) instead of detonating,
     // rockets still explode on contact. ppy keeps the floating-deck threshold honest:
@@ -1295,6 +1359,8 @@ function respawn(p) {
   p.y = groundHeightAt(s.x, s.z) + SPAWN_ABOVE; // start above the floor mesh (never clip in)
   p.vx = 0; p.vy = 0; p.vz = 0;
   p.portalCd = 0;    // fresh portal cooldown on respawn
+  p.padCd = 0;       // fresh jump-pad guard on respawn
+  p.airControlLockout = 0;   // no launch lockout carried into the new life
   checkGround(p);    // immediate ground check: consistent state before the first snapshot
   p.hp = 100;
   p.dead = false;
@@ -1341,6 +1407,8 @@ function createPlayer(socket, name) {
     yaw, pitch: 0,
     hp: 100, dead: false, respawnT: 0, onGround: false, // airborne until the spawn drop settles
     portalCd: 0,                                        // linked-portal teleport cooldown (s)
+    padCd: 0,                                           // jump-pad re-trigger guard (s)
+    airControlLockout: 0,                               // s of no-steering after a jump-pad launch
     weapon: 0, ammo: { ...AMMO_MAX }, fireCd: 0, firingHeld: false,
     input: { f: 0, s: 0, jump: false, fire: false, yaw, pitch: 0 },
     kills: 0, deaths: 0, r: PLAYER_R, h: PLAYER_H,
@@ -1371,6 +1439,10 @@ function buildInit(p) {
          [RAMP_MAX_X, RAMP_CZ, RAMP_MIN_X, RAMP_CZ, RAMP_W, DECK_TOP],   // single outer ramp to N1's west edge
        ],
       buttons: BUTTONS.map((b) => ({ id: b.id, x: b.x, y: b.y, z: b.z, r: b.r })),
+      // low-profile launch pads on open floor (aerial access to N2/N3): the client
+      // renders a pulsing neon-green hex pad at each position; trigger + impulse are
+      // server-side only (checkJumpPads).
+      jumpPads: JUMP_PADS.map((j) => ({ id: j.id, x: j.x, y: j.y, z: j.z, r: JUMP_PAD_RADIUS })),
       // y = the doorway's floor level (0 ground / deck anchor embedded in the thin
       // node slab) so the client renders highground doorways sitting on the deck;
       // color = the pair's distinct neon glow (both ends of a link share it).
@@ -1485,7 +1557,9 @@ function step(dt) {
       continue;
     }
     if (p.portalCd > 0) p.portalCd = Math.max(0, p.portalCd - dt); // linked-portal cooldown
+    if (p.padCd > 0) p.padCd = Math.max(0, p.padCd - dt);          // jump-pad re-trigger guard
     updatePlayerPhysics(p, dt);
+    checkJumpPads(p);   // pad trigger -> impulse launch + air-control lockout
     checkPortals(p);   // doorway trigger -> instant translation to the paired portal
     updateWeapon(p, dt);
     checkPickups(p);
