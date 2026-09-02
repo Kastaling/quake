@@ -19,11 +19,13 @@
  *  - Blast Jump Engine: grenades/rockets apply pure radial impulse vectors —
  *    direction computed from blast center to each player's position -> strong
  *    angled horizontal + vertical boosts for proper rocket / grenade jumping.
- *  - Arena map: cover blocks, elevated ramps, triangular highground — three thin
- *    floating deck nodes (21x21 footprint, top at Y = 8.0, open underneath) in a
- *    triangular layout linked by elevated horizontal walkways, each node reached
- *    by one sloped access ramp from the ground floor; distinct per-pair portal
- *    glow colors, +25 HP packs, ammo crates.
+ *  - Arena map: cover blocks, triangular highground — three thin floating deck
+ *    nodes (21x21 footprint, top at Y = 8.0, open underneath) in a triangular
+ *    layout linked by elevated horizontal walkways; the arena's single sloped
+ *    access ramp sits on open floor OUTSIDE the triangle, climbing from the
+ *    ground-floor perimeter up to node N1's outer edge (Y = 8.0), leaving the
+ *    central area above the button platform free of any ramp geometry; distinct
+ *    per-pair portal glow colors, +25 HP packs, ammo crates.
  *  - Central buttons: NUKE (wipes the horde, 30 s overhead cooldown meter) and
  *    INHIBIT (disables zombie spawns for 30 s).
  *  - Zombie AI engine: continuous horde spawner with INVERSE player scaling
@@ -50,9 +52,7 @@ const SNAPSHOT_EVERY = 2;             // broadcast world state every N ticks (30
 /* --- Arena geometry -------------------------------------------------------- */
 const ARENA_HALF = 60;                // outer walls at +/-60 (scaled down ~25% from the 2x +/-80 -> balanced midground)
 const PLAT_HALF = 6;                  // central platform half-extent
-const PLAT_TOP = 2.0;                 // central platform height
-const RAMP_LEN = 4;                   // ramp run length (one per side)
-const RAMP_W = 5;                     // ramp half-width
+const PLAT_TOP = 2.0;                 // central platform height (no ramps around it — the area above stays open)
 
 /* --- Triangular highground: three floating deck nodes ------------------------ */
 // Open upper floor: THREE THIN FLOATING PLATFORM NODES in a triangular layout,
@@ -65,9 +65,10 @@ const RAMP_W = 5;                     // ramp half-width
 // no railings: players can walk their whole perimeter and fall off any edge (the
 // height field simply drops back to ground level outside a footprint). Three
 // elevated horizontal WALKWAYS at deck level link the node pairs edge-to-edge
-// (rotated footprints; also one-way), and three sloped access ramps
-// (rise DECK_TOP over run RAMP2_LEN, ~34 deg) climb from ground level up to one
-// face of each node.
+// (rotated footprints; also one-way). The arena has a SINGLE sloped access ramp
+// (rise DECK_TOP over run RAMP_LEN, ~24 deg) on open floor outside the triangle:
+// it climbs from the ground-floor perimeter up to node N1's outer (west) edge —
+// no ramps slope inward toward or over the central button platform.
 const DECK_TOP = 8.0;                 // upper node surface height (Y)
 const DECK_THICK = 0.5;               // floating deck thickness (u)
 const NODE_HALF = 10.5;               // 21x21 footprint half-extent per node
@@ -122,35 +123,24 @@ function inWalkwayXZ(x, z, w) {
   return Math.abs(lx) <= w.len / 2 && Math.abs(lz) <= WALK_W / 2;
 }
 
-/* --- Access ramps: ground floor -> deck nodes -------------------------------- */
-// One sloped ramp per node (rise DECK_TOP over run RAMP2_LEN, ~34 deg), mouth
-// centered on a node face. Each is a linear incline in the height field —
-// continuous with both the node top at the face and open floor at the ground end.
-const RAMP2_LEN = 12;                 // horizontal run of each access ramp
-const RAMP2_W = 4;                    // half-width of each access ramp mouth
-// N1 east approach: from the deck face x=NODES[0].maxX down to ground at +RAMP2_LEN,
-// mouth centered on z=-30 (width along the face: z in [-34, -26]).
-const RAMP_A_MIN_X = NODES[0].maxX;                    // -19.5 (deck edge, height DECK_TOP)
-const RAMP_A_MAX_X = NODES[0].maxX + RAMP2_LEN;        // -7.5  (ground end, height 0)
-const RAMP_A_CZ = NODES[0].cz;                         // -30
-const RAMP_A_MIN_Z = RAMP_A_CZ - RAMP2_W;              // -34
-const RAMP_A_MAX_Z = RAMP_A_CZ + RAMP2_W;              // -26
-// N2 south approach: from the deck face z=NODES[1].maxZ down to ground at +RAMP2_LEN,
-// mouth centered on x=-30 (width along the face: x in [-34, -26]).
-const RAMP_B_MIN_Z = NODES[1].maxZ;                    // 28.5 (deck edge, height DECK_TOP)
-const RAMP_B_MAX_Z = NODES[1].maxZ + RAMP2_LEN;        // 40.5 (ground end, height 0)
-const RAMP_B_CX = NODES[1].cx;                         // -30
-const RAMP_B_MIN_X = RAMP_B_CX - RAMP2_W;              // -34
-const RAMP_B_MAX_X = RAMP_B_CX + RAMP2_W;              // -26
-// N3 west approach: from the deck face x=NODES[2].minX down to ground at -RAMP2_LEN,
-// mouth centered on z=-6 (width along the face: z in [-10, 2]). The incline crosses
-// over the central platform's top (slope >= 3 there vs its 2.0 top) so the height
-// field stays continuous across the overlap.
-const RAMP_C_MIN_X = NODES[2].minX - RAMP2_LEN;        // -10.5 (ground end, height 0)
-const RAMP_C_MAX_X = NODES[2].minX;                    // 1.5   (deck edge, height DECK_TOP)
-const RAMP_C_CZ = NODES[2].cz;                         // -6
-const RAMP_C_MIN_Z = RAMP_C_CZ - RAMP2_W;              // -10
-const RAMP_C_MAX_Z = RAMP_C_CZ + RAMP2_W;              // 2
+/* --- Single outer access ramp: ground floor -> node N1 ----------------------- */
+// The ONLY ramp in the arena. It sits on open floor OUTSIDE the upper platform
+// triangle — nothing slopes inward toward or over the central button platform,
+// so the area above it stays 100% free of ramp geometry. One long incline
+// (rise DECK_TOP over run RAMP_LEN, ~24 deg) climbs from the ground-floor
+// perimeter up to node N1's outer (west) edge: continuous with both the deck top
+// at the face and open floor at the ground end.
+const RAMP_LEN = 18;                  // horizontal run of the single access ramp
+const RAMP_W = 4;                     // half-width of the ramp mouth (along z)
+// N1 west approach: from the deck face x=NODES[0].minX down to ground at -RAMP_LEN,
+// mouth centered on z=-30 (width along the face: z in [-34, -26]). The ground end
+// sits just inside the west perimeter wall (-60), so the ramp starts right at the
+// ground floor perimeter.
+const RAMP_MIN_X = NODES[0].minX - RAMP_LEN;        // -58.5 (ground end, height 0)
+const RAMP_MAX_X = NODES[0].minX;                   // -40.5 (deck edge, height DECK_TOP)
+const RAMP_CZ = NODES[0].cz;                        // -30
+const RAMP_MIN_Z = RAMP_CZ - RAMP_W;                // -34
+const RAMP_MAX_Z = RAMP_CZ + RAMP_W;                // -26
 
 /* --- Quake/Source-style movement physics (overhauled) ----------------------- */
 const GRAVITY = 38;                   // units/s^2 (raised with the jump for a snappier arc)
@@ -173,8 +163,8 @@ const STEP = 0.55;                    // auto step-up height
 // Max vertical gap the landing snap will bridge in one tick. Must exceed the
 // largest per-tick fall distance (terminal -60 u/s * DT = 1.0 u) so fast falls
 // always land instead of tunneling, while staying far below tall surfaces like
-// the deck-node ramp mouths — an entity sliding along a wall into one of those
-// mouths is BELOW an unreachable step and must hold at its lower floor instead
+// the outer ramp's deck-level mouth — an entity sliding along a wall into that
+// mouth is BELOW an unreachable step and must hold at its lower floor instead
 // of being teleported up onto the slope.
 const SNAP_GAP_MAX = 1.25;            // u: landing-snap reach (see reachableFloorAt)
 
@@ -298,9 +288,10 @@ const PORTAL_PAIR_COLORS = { 1: 0x00ffff, 2: 0xff6600, 3: 0x00ff66, 4: 0xff00ff 
 const PORTALS = [
   { id: 'A', x: -54, z: -25.5, y: 0, axis: 'x', dir: 1, pair: 1 },    // west flank doorway (ground), faces +X into the arena
   { id: 'B', x:  54, z:  25.5, y: 0, axis: 'x', dir: -1, pair: 1 },   // east flank doorway (ground), faces -X into the arena
-  // Pair 3 — ground floor <-> highground: brackets ramp A's mouth on node N1;
-  // C on open floor just past the ramp's ground end, D on the N1 node surface.
-  { id: 'C', x: -7, z: -31, y: 0, axis: 'x', dir: 1, pair: 3 },       // ground doorway east of ramp A base, faces +X (east)
+  // Pair 3 — ground floor <-> highground: C on open floor near the central area,
+  // D on the N1 node surface (the single outer access ramp now connects to N1's
+  // west face).
+  { id: 'C', x: -7, z: -31, y: 0, axis: 'x', dir: 1, pair: 3 },       // ground doorway east of the central platform, faces +X (east)
   { id: 'D', x: -20, z: -30, y: DECK_TOP - PORTAL_DECK_EMBED, axis: 'x', dir: -1, pair: 3 }, // N1 node doorway at the ramp mouth, faces -X (west) into the node
   // Pair 4 — highground <-> highground: E on the N2 node surface and F on the
   // N3 node surface; both sit fully inside their footprints and only deck-level
@@ -336,8 +327,8 @@ const r3 = (v) => Math.round(v * 1000) / 1000;
 
 /**
  * Height of the walkable floor at (x, z): base ground, central platform top,
- * the four ramps leading to it, the three deck-node access-ramp inclines, the
- * elevated walkways between nodes, and the tops of any solid we stand on.
+ * the single outer access ramp to node N1, the elevated walkways between nodes,
+ * and the tops of any solid we stand on.
  * `feetY` is the entity's current feet height — it only matters for FLOATERS
  * (one-way platforms) and WALKWAYS: a floating deck's top counts as floor ONLY
  * when the feet are already within STEP of it, so entities under the open decks
@@ -351,25 +342,12 @@ function groundHeightAt(x, z, feetY = Infinity) {
   let h = 0;
   const ax = Math.abs(x), az = Math.abs(z);
   if (ax <= PLAT_HALF && az <= PLAT_HALF) {
-    h = PLAT_TOP; // central platform
-  } else {
-    // one ramp per side, sloping from PLAT_TOP down to 0 over RAMP_LEN
-    if (ax <= RAMP_W && az > PLAT_HALF && az <= PLAT_HALF + RAMP_LEN) {
-      h = PLAT_TOP * ((PLAT_HALF + RAMP_LEN - az) / RAMP_LEN);
-    } else if (az <= RAMP_W && ax > PLAT_HALF && ax <= PLAT_HALF + RAMP_LEN) {
-      h = PLAT_TOP * ((PLAT_HALF + RAMP_LEN - ax) / RAMP_LEN);
-    }
+    h = PLAT_TOP; // central platform (no ramps around it — the area above stays open)
   }
-  // deck-node access-ramp inclines: linear slope from ground (0) up to DECK_TOP,
-  // continuous with both the node top at the face and open floor at the ground end.
-  if (x >= RAMP_A_MIN_X && x <= RAMP_A_MAX_X && z >= RAMP_A_MIN_Z && z <= RAMP_A_MAX_Z) {
-    h = Math.max(h, DECK_TOP * ((RAMP_A_MAX_X - x) / RAMP2_LEN));   // 0 at ground end -> 8 at deck face
-  }
-  if (x >= RAMP_B_MIN_X && x <= RAMP_B_MAX_X && z >= RAMP_B_MIN_Z && z <= RAMP_B_MAX_Z) {
-    h = Math.max(h, DECK_TOP * ((RAMP_B_MAX_Z - z) / RAMP2_LEN));   // 0 at ground end -> 8 at deck face
-  }
-  if (x >= RAMP_C_MIN_X && x <= RAMP_C_MAX_X && z >= RAMP_C_MIN_Z && z <= RAMP_C_MAX_Z) {
-    h = Math.max(h, DECK_TOP * ((x - RAMP_C_MIN_X) / RAMP2_LEN));   // 0 at ground end -> 8 at deck face
+  // single outer access ramp: linear slope from ground (0) up to DECK_TOP at N1's
+  // west face, continuous with both the node top and open floor at the ground end.
+  if (x >= RAMP_MIN_X && x <= RAMP_MAX_X && z >= RAMP_MIN_Z && z <= RAMP_MAX_Z) {
+    h = Math.max(h, DECK_TOP * ((x - RAMP_MIN_X) / RAMP_LEN));      // 0 at ground end -> 8 at deck face
   }
   for (const s of SOLIDS) {
     if (x >= s.minX && x <= s.maxX && z >= s.minZ && z <= s.maxZ) h = Math.max(h, s.top);
@@ -395,22 +373,15 @@ function groundHeightAt(x, z, feetY = Infinity) {
  * Highest walkable surface within STEP reach of feet at height y: base ground
  * plus any solid top / ramp slope no more than STEP above the feet. Used by the
  * landing logic when an entity is BELOW a tall local surface (e.g., sliding
- * along a wall into a deck-node ramp mouth): it resolves their floor to the
- * lower reachable level instead of snapping them up onto the unreachable step.
+ * along a wall into the outer ramp's deck-level mouth): it resolves their floor
+ * to the lower reachable level instead of snapping them up onto the unreachable
+ * step.
  */
 function reachableFloorAt(x, z, y) {
   let h = 0;                          // base ground is always walkable
   const reach = y + STEP;
-  if (x >= RAMP_A_MIN_X && x <= RAMP_A_MAX_X && z >= RAMP_A_MIN_Z && z <= RAMP_A_MAX_Z) {
-    const rh = DECK_TOP * ((RAMP_A_MAX_X - x) / RAMP2_LEN);
-    if (rh <= reach) h = Math.max(h, rh);
-  }
-  if (x >= RAMP_B_MIN_X && x <= RAMP_B_MAX_X && z >= RAMP_B_MIN_Z && z <= RAMP_B_MAX_Z) {
-    const rh = DECK_TOP * ((RAMP_B_MAX_Z - z) / RAMP2_LEN);
-    if (rh <= reach) h = Math.max(h, rh);
-  }
-  if (x >= RAMP_C_MIN_X && x <= RAMP_C_MAX_X && z >= RAMP_C_MIN_Z && z <= RAMP_C_MAX_Z) {
-    const rh = DECK_TOP * ((x - RAMP_C_MIN_X) / RAMP2_LEN);
+  if (x >= RAMP_MIN_X && x <= RAMP_MAX_X && z >= RAMP_MIN_Z && z <= RAMP_MAX_Z) {
+    const rh = DECK_TOP * ((x - RAMP_MIN_X) / RAMP_LEN);            // 0 at ground end -> 8 at deck face
     if (rh <= reach) h = Math.max(h, rh);
   }
   for (const s of SOLIDS) {
@@ -471,9 +442,9 @@ function clampToArena(ent) {
  *  - Jump: impulse preserves all horizontal momentum; the halved JUMP_VEL
  *    (11) gives a ~1.6 u apex and a ~0.58 s airtime window for strafing each hop.
  *  - Landing snap guard: when the feet end up BELOW a local surface taller than
- *    SNAP_GAP_MAX above them (a tall deck-node ramp mouth reached by sliding
- *    along its wall), they hold at the highest reachable floor instead of being
- *    teleported up onto the slope — see reachableFloorAt().
+ *    SNAP_GAP_MAX above them (the outer ramp's tall deck-level mouth reached by
+ *    sliding along its wall), they hold at the highest reachable floor instead
+ *    of being teleported up onto the slope — see reachableFloorAt().
  */
 function updatePlayerPhysics(p, dt) {
   const inp = p.input;
@@ -1385,7 +1356,7 @@ function buildInit(p) {
     map: {
       arenaHalf: ARENA_HALF,
       solids: SOLIDS.map((s) => [s.minX, s.maxX, s.minZ, s.maxZ, s.top]),
-      plat: [PLAT_HALF, PLAT_TOP, RAMP_LEN, RAMP_W],
+      plat: [PLAT_HALF, PLAT_TOP],   // central platform (no ramps around it)
       // triangular highground: the three floating deck nodes render from
       // `floaters` as [minX, maxX, minZ, maxZ, bottom, top] — thin decks with open
       // space underneath (the client renders + raycasts them; collision is the
@@ -1394,13 +1365,11 @@ function buildInit(p) {
       // deck level spanning edge-to-edge between two nodes.
       floaters: FLOATERS.map((f) => [f.minX, f.maxX, f.minZ, f.maxZ, f.bottom, f.top]),
       walkways: WALKWAYS.map((w) => [w.cx, w.cz, w.len, WALK_W, w.ang, DECK_TOP - DECK_THICK, DECK_TOP]),
-      // access ramps as [xTop, zTop, xBot, zBot, halfWidth, topY] — top point at
-      // the node face (height topY), bottom point on open floor (0).
-      ramps2: [
-        [RAMP_A_MIN_X, RAMP_A_CZ, RAMP_A_MAX_X, RAMP_A_CZ, RAMP2_W, DECK_TOP],   // N1 east approach
-        [RAMP_B_CX, RAMP_B_MIN_Z, RAMP_B_CX, RAMP_B_MAX_Z, RAMP2_W, DECK_TOP],   // N2 south approach
-        [RAMP_C_MAX_X, RAMP_C_CZ, RAMP_C_MIN_X, RAMP_C_CZ, RAMP2_W, DECK_TOP],   // N3 west approach (top at deck edge)
-      ],
+       // the single outer access ramp as [xTop, zTop, xBot, zBot, halfWidth, topY] —
+       // top point at N1's west face (height topY), bottom point on open floor (0).
+       ramps2: [
+         [RAMP_MAX_X, RAMP_CZ, RAMP_MIN_X, RAMP_CZ, RAMP_W, DECK_TOP],   // single outer ramp to N1's west edge
+       ],
       buttons: BUTTONS.map((b) => ({ id: b.id, x: b.x, y: b.y, z: b.z, r: b.r })),
       // y = the doorway's floor level (0 ground / deck anchor embedded in the thin
       // node slab) so the client renders highground doorways sitting on the deck;

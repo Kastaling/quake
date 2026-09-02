@@ -2,12 +2,13 @@
  * ============================================================================
  *  game.js — Three.js client for the Quake arena // zombie siege server
  * ============================================================================
- *  - First-person renderer: retro grid arena, cover blocks, ramps, triangular
- *    highground — three thin floating deck nodes (21x21, top at Y=8, open
- *    underneath) linked by elevated walkways with one sloped access ramp per
- *    node, central platform with the two interactive buttons (overhead cooldown
- *    meters), pickups, remote players and zombies. Portals glow in a distinct
- *    neon color per pair so linked doorways are easy to identify.
+ *  - First-person renderer: retro grid arena, cover blocks, triangular highground
+ *    — three thin floating deck nodes (21x21, top at Y=8, open underneath) linked
+ *    by elevated walkways; the single sloped access ramp sits on open floor outside
+ *    the triangle, climbing from the ground-floor perimeter up to node N1's outer
+ *    edge (Y=8), central platform with the two interactive buttons (overhead
+ *    cooldown meters), pickups, remote players and zombies. Portals glow in a
+ *    distinct neon color per pair so linked doorways are easy to identify.
  *  - Interpolation / extrapolation: remote entity positions are sampled from a
  *    ring buffer of server snapshots at a render delay (120 ms) with capped
  *    velocity extrapolation when data runs out. The local player camera is fully
@@ -355,17 +356,8 @@ function buildWorld(map) {
     scene.add(ramp);
   };
 
-  // ramps leading to the central platform (one per side), matching server slopes
-  const [PH, PT, RL, RW] = map.plat;
-  for (const d of [[0, 0, 1], [0, 0, -1], [1, 0, 0], [-1, 0, 0]]) {
-    addRampMesh(
-      new THREE.Vector3(d[0] * PH, PT, d[2] * PH),
-      new THREE.Vector3(d[0] * (PH + RL), 0, d[2] * (PH + RL)),
-      RW);
-  }
-
-  // deck-node access ramps: ground -> upper node surface, matching the server's
-  // ramp inclines in groundHeightAt. Each entry is [xTop, zTop, xBot, zBot, halfW, topY].
+  // single outer access ramp: ground floor -> node N1's outer edge, matching the
+  // server's incline in groundHeightAt. Each entry is [xTop, zTop, xBot, zBot, halfW, topY].
   for (const r of map.ramps2 || []) {
     addRampMesh(
       new THREE.Vector3(r[0], r.length > 5 ? r[5] : 8, r[1]),
