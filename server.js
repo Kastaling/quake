@@ -44,7 +44,7 @@ const DT = 1 / TICK_RATE;             // fixed timestep
 const SNAPSHOT_EVERY = 2;             // broadcast world state every N ticks (30 Hz)
 
 /* --- Arena geometry -------------------------------------------------------- */
-const ARENA_HALF = 80;                // outer walls at +/-80 (arena doubled from +/-40)
+const ARENA_HALF = 60;                // outer walls at +/-60 (scaled down ~25% from the 2x +/-80 -> balanced midground)
 const PLAT_HALF = 6;                  // central platform half-extent
 const PLAT_TOP = 2.0;                 // central platform height
 const RAMP_LEN = 4;                   // ramp run length (one per side)
@@ -110,59 +110,63 @@ const HEALTH_RESPAWN = 10;            // seconds
 const AMMO_RESPAWN = 15;              // seconds
 
 /* --- Static map solids (cover blocks + central platform) --------------------- */
-// Arena doubled to +/-80: every cover block / crate / side platform is scaled 2x
-// in X/Z and redistributed across the expanded layout. The central platform with
-// the NUKE/INHIBIT buttons stays at its original size as the map's focal point.
+// Arena scaled down ~25% to +/-60: every cover block / crate / side platform is
+// scaled 0.75x in X/Z from the doubled layout and redistributed across the
+// midground arena. The central platform with the NUKE/INHIBIT buttons stays at
+// its original size as the map's focal point.
 const SOLIDS = [
   { minX: -PLAT_HALF, maxX: PLAT_HALF, minZ: -PLAT_HALF, maxZ: PLAT_HALF, top: PLAT_TOP }, // center platform
-  { minX: -28, maxX: -20, minZ: -6, maxZ: 6,   top: 1.6 },   // west cover block
-  { minX:  20, maxX:  28, minZ: -6, maxZ: 6,   top: 1.6 },   // east cover block
-  { minX: -6,  maxX:  6,  minZ: -40, maxZ: -32, top: 1.2 },  // north cover block
-  { minX: -6,  maxX:  6,  minZ: 32,  maxZ: 40,  top: 1.2 },  // south cover block
-  { minX: -16, maxX: -12, minZ: 20,  maxZ: 52,  top: 1.5 },  // west wall segment
-  { minX:  12, maxX:  16, minZ: -52, maxZ: -20, top: 1.5 },  // east wall segment
-  { minX: -60, maxX: -54, minZ: -60, maxZ: -54, top: 1.4 },  // corner crates
-  { minX:  54, maxX:  60, minZ: -60, maxZ: -54, top: 1.4 },
-  { minX: -60, maxX: -54, minZ: 54,  maxZ: 60,  top: 1.4 },
-  { minX:  54, maxX:  60, minZ: 54,  maxZ: 60,  top: 1.4 },
-  { minX: -48, maxX: -36, minZ: 12,  maxZ: 24,  top: 1.8 },  // elevated side platforms (jumpable)
-  { minX:  36, maxX:  48, minZ: -24, maxZ: -12, top: 1.8 },
+  { minX: -21,   maxX: -15,   minZ: -4.5, maxZ: 4.5,  top: 1.6 },   // west cover block
+  { minX:  15,   maxX:  21,   minZ: -4.5, maxZ: 4.5,  top: 1.6 },   // east cover block
+  { minX: -4.5,  maxX:  4.5,  minZ: -30,  maxZ: -24,  top: 1.2 },   // north cover block
+  { minX: -4.5,  maxX:  4.5,  minZ: 24,   maxZ: 30,   top: 1.2 },   // south cover block
+  { minX: -12,   maxX: -9,    minZ: 15,   maxZ: 39,   top: 1.5 },   // west wall segment
+  { minX:  9,    maxX:  12,   minZ: -39,  maxZ: -15,  top: 1.5 },   // east wall segment
+  { minX: -45,   maxX: -40.5, minZ: -45,  maxZ: -40.5, top: 1.4 },  // corner crates
+  { minX:  40.5, maxX:  45,   minZ: -45,  maxZ: -40.5, top: 1.4 },
+  { minX: -45,   maxX: -40.5, minZ: 40.5, maxZ: 45,   top: 1.4 },
+  { minX:  40.5, maxX:  45,   minZ: 40.5, maxZ: 45,   top: 1.4 },
+  { minX: -36,   maxX: -27,   minZ: 9,    maxZ: 18,   top: 1.8 },   // elevated side platforms (jumpable)
+  { minX:  27,   maxX:  36,   minZ: -18,  maxZ: -9,   top: 1.8 },
 ];
 
 /* --- Pickups (defined after SOLIDS so groundHeightAt() can resolve tops) ----- */
-// Positions scaled 2x to match the doubled arena.
+// Positions scaled 0.75x to match the midground arena (+/-60) — every crate and
+// pack stays on open floor inside the new perimeter walls.
 const PICKUPS = [
-  { id: 1, kind: 'health', x: -36, z: -28 },
-  { id: 2, kind: 'health', x:  36, z:  28 },
-  { id: 3, kind: 'health', x: -28, z:  36 },
-  { id: 4, kind: 'health', x:  28, z: -36 },
-  { id: 5, kind: 'health', x:   0, z: -52 },
-  { id: 6, kind: 'health', x:   0, z:  52 },
-  { id: 7, kind: 'ammo',   x: -64, z:   0 },
-  { id: 8, kind: 'ammo',   x:  64, z:   0 },
-  { id: 9, kind: 'ammo',   x:   0, z: -64 },
-  { id: 10, kind: 'ammo',  x:   0, z:  64 },
+  { id: 1, kind: 'health', x: -27, z: -21 },
+  { id: 2, kind: 'health', x:  27, z:  21 },
+  { id: 3, kind: 'health', x: -21, z:  27 },
+  { id: 4, kind: 'health', x:  21, z: -27 },
+  { id: 5, kind: 'health', x:   0, z: -39 },
+  { id: 6, kind: 'health', x:   0, z:  39 },
+  { id: 7, kind: 'ammo',   x: -48, z:   0 },
+  { id: 8, kind: 'ammo',   x:  48, z:   0 },
+  { id: 9, kind: 'ammo',   x:   0, z: -48 },
+  { id: 10, kind: 'ammo',  x:   0, z:  48 },
 ].map((p) => ({ ...p, y: groundHeightAt(p.x, p.z), taken: false, timer: 0 }));
 
 /* --- Spawn points (perimeter ring) ------------------------------------------ */
-// Ring radius doubled to 64 and widened from 8 to 12 points so respawns stay
-// well distributed around the expanded +/-80 perimeter.
+// Ring radius scaled to 48 (0.75x of the doubled 64) so respawns stay well
+// distributed around the midground +/-60 perimeter, inside the walls.
 const SPAWNS = [];
 for (let i = 0; i < 12; i++) {
   const a = (i * Math.PI) / 6 + Math.PI / 12;
-  SPAWNS.push({ x: Math.cos(a) * 64, z: Math.sin(a) * 64 });
+  SPAWNS.push({ x: Math.cos(a) * 48, z: Math.sin(a) * 48 });
 }
 
 /* --- Linked portal teleporters ---------------------------------------------- */
 // Paired doorway entities: walking into Portal A instantly translates the player
-// (position + momentum vector) out of Portal B, and vice versa. `axis` is the
+// (position + momentum vector) out of Portal B, and vice versa. Rockets and
+// grenades also travel through them (see checkProjectilePortals). `axis` is the
 // doorway's normal axis ('x' or 'z'); `dir` points from the doorway INTO the
 // arena (the exit side). The 0.5 s per-player cooldown prevents instant
-// re-trigger loops if an exit ever overlaps another trigger zone.
+// re-trigger loops if an exit ever overlaps another trigger zone. Positions are
+// scaled 0.75x to sit on open floor inside the midground +/-60 perimeter.
 const PORTAL_CD = 0.5;                // seconds before a player may teleport again
 const PORTALS = [
-  { id: 'A', x: -72, z: -34, axis: 'x', dir: 1 },   // west flank doorway, faces +X into the arena
-  { id: 'B', x:  72, z:  34, axis: 'x', dir: -1 },  // east flank doorway, faces -X into the arena
+  { id: 'A', x: -54, z: -25.5, axis: 'x', dir: 1 },   // west flank doorway, faces +X into the arena
+  { id: 'B', x:  54, z:  25.5, axis: 'x', dir: -1 },  // east flank doorway, faces -X into the arena
 ];
 const PORTAL_PAIR = { A: 'B', B: 'A' };
 
@@ -349,6 +353,64 @@ function checkPortals(p) {
   }
 }
 
+/**
+ * Orthonormal local frame for a doorway: `n` points INTO the arena along the
+ * portal's facing direction, `u` is world up, and `s` spans the doorway plane.
+ * Used to re-orient projectile velocity when it hops between linked portals —
+ * an orthonormal basis change preserves speed exactly.
+ */
+function portalBasis(pt) {
+  const nx = pt.axis === 'x' ? pt.dir : 0;
+  const nz = pt.axis === 'z' ? pt.dir : 0;
+  // side = cross(up, normal), normalized (up = world Y, normal has no y component)
+  let sx = nz, sy = 0, sz = -nx;
+  const sl = Math.hypot(sx, sy, sz) || 1;
+  return { n: [nx, 0, nz], u: [0, 1, 0], s: [sx / sl, sy / sl, sz / sl] };
+}
+
+/**
+ * Linked-portal travel for ROCKETS and GRENADES. If a projectile's position falls
+ * inside an active doorway trigger zone (same bounds as the player doors), it is
+ * translated to the paired portal's exit point and its velocity vector is
+ * re-oriented relative to the EXIT portal's facing direction: the through-
+ * component now aligns with that portal's `dir` while the full speed magnitude is
+ * preserved. A short per-projectile cooldown blocks any instant re-trigger at the
+ * exit doorway. Nails never reach this path (they run stepNail and skip portal
+ * processing entirely — a deliberate server-performance optimization). Updated
+ * positions ride the next 30 Hz snapshot out to every connected client.
+ */
+function checkProjectilePortals(pr) {
+  if (pr.portalCd > 0) return;
+  for (const pt of PORTALS) {
+    const along = pt.axis === 'x' ? pr.x - pt.x : pr.z - pt.z;   // depth into the doorway plane
+    const across = pt.axis === 'x' ? pr.z - pt.z : pr.x - pt.x;  // offset across the doorway width
+    if (Math.abs(along) < 1.3 && Math.abs(across) < 1.7) {
+      const exit = PORTALS.find((q) => q.id === PORTAL_PAIR[pt.id]);
+      const ex = exit.axis === 'x' ? exit.x + exit.dir * 1.5 : exit.x; // just inside the far doorway
+      const ez = exit.axis === 'z' ? exit.z + exit.dir * 1.5 : exit.z;
+
+      // re-orient velocity: decompose in the entry portal's frame, reconstruct in
+      // the exit portal's frame (orthonormal -> speed preserved exactly)
+      const bi = portalBasis(pt);
+      const bo = portalBasis(exit);
+      const vnIn = pr.vx * bi.n[0] + pr.vy * bi.n[1] + pr.vz * bi.n[2];
+      const vuIn = pr.vx * bi.u[0] + pr.vy * bi.u[1] + pr.vz * bi.u[2];
+      const vsIn = pr.vx * bi.s[0] + pr.vy * bi.s[1] + pr.vz * bi.s[2];
+      pr.vx = vnIn * bo.n[0] + vuIn * bo.u[0] + vsIn * bo.s[0];
+      pr.vy = vnIn * bo.n[1] + vuIn * bo.u[1] + vsIn * bo.s[1];
+      pr.vz = vnIn * bo.n[2] + vuIn * bo.u[2] + vsIn * bo.s[2];
+
+      // preserve height above local ground so mid-air entries land at matching altitude
+      const hAbove = Math.max(0, pr.y - groundHeightAt(pr.x, pr.z));
+      pr.x = ex; pr.z = ez;
+      pr.y = groundHeightAt(ex, ez) + hAbove;
+
+      pr.portalCd = PORTAL_CD;   // block instant re-trigger at the exit doorway
+      return;
+    }
+  }
+}
+
 /* ============================== COMBAT / WEAPONS ============================ */
 
 /** Unit aim vector from the player's latest input yaw/pitch (client YXZ camera convention). */
@@ -438,7 +500,7 @@ function fireWeapon(p, w) {
 
   if (w.kind === 'projectile') {
     projectiles.push({
-      id: nextId.proj++, wi: WEAPONS.indexOf(w), owner: p.id, age: 0,
+      id: nextId.proj++, wi: WEAPONS.indexOf(w), owner: p.id, age: 0, portalCd: 0,
       // muzzle offset along the aim vector; y uses a shorter reach so a rocket
       // fired straight down still takes ~3 ticks to hit the floor — long enough
       // for a moving shooter to pull ahead of it (the lag that makes rjumps work)
@@ -586,6 +648,14 @@ function updateProjectiles(dt) {
     pr.x += pr.vx * dt;
     pr.y += pr.vy * dt;
     pr.z += pr.vz * dt;
+
+    // linked-portal travel (rockets/grenades only — nails take the stepNail path
+    // above and skip this entirely for server performance): entering a doorway
+    // trigger translates to the paired portal's exit and re-orients velocity
+    // relative to that portal's facing while preserving speed. The new position
+    // syncs to all clients via the next 30 Hz snapshot.
+    if (pr.portalCd > 0) pr.portalCd = Math.max(0, pr.portalCd - dt);
+    checkProjectilePortals(pr);
 
     const isGrenade = w.id === 'grenade';
     let boom = false;

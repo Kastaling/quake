@@ -142,7 +142,7 @@ renderer.setSize(window.innerWidth, window.innerHeight);
 
 const scene = new THREE.Scene();
 scene.background = new THREE.Color(0x05070d);
-// Fog range scaled for the doubled arena (160u wide, ~226u corner-to-corner) so
+// Fog range sized for the midground arena (120u wide, ~170u corner-to-corner) so
 // the far walls stay visible instead of dissolving into the background.
 scene.fog = new THREE.Fog(0x05070d, 45, 210);
 
@@ -220,7 +220,7 @@ function makeGridTexture() {
     g.fillStyle = `rgba(140,180,255,${Math.random() * 0.04})`;
     g.fillRect(Math.floor(Math.random() * 512), Math.floor(Math.random() * 512), 1, 1);
   }
-  const cells = 80; // 160 world units / 2u cell (arena doubled to +/-80)
+  const cells = 60; // 120 world units / 2u cell (midground arena scaled down ~25% to +/-60)
   const px = 512 / cells;
   g.strokeStyle = 'rgba(70,160,255,0.22)';
   g.lineWidth = 1;
@@ -1730,7 +1730,13 @@ function updateEntities(now, dt) {
     const s = sampleAt(`pr:${e[0]}`, rtOthers, 3, true);
     if (s && isFiniteNum(s[1]) && isFiniteNum(s[2]) && isFiniteNum(s[3])) {
       pr.mesh.position.set(s[1], s[2], s[3]);
-      // trail history
+      // trail history — a portal hop (rocket/grenade traveling between linked
+      // doorways) shows up as a teleport-sized jump in the synced positions:
+      // restart the trail at the exit point so no streak is drawn across the map
+      const lastPt = pr.hist.length ? pr.hist[pr.hist.length - 1] : null;
+      if (lastPt && Math.abs(s[1] - lastPt.x) + Math.abs(s[2] - lastPt.y) + Math.abs(s[3] - lastPt.z) > 8) {
+        pr.hist.length = 0;
+      }
       pr.hist.push(new THREE.Vector3(s[1], s[2], s[3]));
       if (pr.hist.length > 8) pr.hist.shift();
       const attr = pr.trail.geometry.attributes.position;
