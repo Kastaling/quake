@@ -2,10 +2,11 @@
  * ============================================================================
  *  game.js — Three.js client for the Quake arena // zombie siege server
  * ============================================================================
- *  - First-person renderer: retro grid arena, cover blocks, ramps, open
- *    second-floor mezzanine deck (Y=8) with its two sloped access ramps, central
- *    platform with the two interactive buttons (overhead cooldown meters),
- *    pickups, remote players and zombies.
+ *  - First-person renderer: retro grid arena, cover blocks, ramps, thin floating
+ *    second-floor platform slab (deck at Y=8, open underneath) with its two sloped
+ *    access ramps, central platform with the two interactive buttons (overhead
+ *    cooldown meters), pickups, remote players and zombies. Portals glow in a
+ *    distinct neon color per pair so linked doorways are easy to identify.
  *  - Interpolation / extrapolation: remote entity positions are sampled from a
  *    ring buffer of server snapshots at a render delay (120 ms) with capped
  *    velocity extrapolation when data runs out. The local player camera is fully
@@ -82,7 +83,9 @@ const projectiles3d = new Map();// id -> { mesh, trail, kind }
 const pickups3d = new Map();   // id -> { group, baseY }
 let button3d = {};             // 'nuke' | 'inhibit' -> { group, fill, dome, light, label }
 // Linked portal teleporters (pairs A<->B ground flanks, C<->D ground/deck, E<->F deck ends):
-// id -> { group, field, core, light, phase, flash, x, y, z } (y = doorway floor level)
+// id -> { group, field, core, light, phase, flash, x, y, z } (y = doorway floor level).
+// Each pair glows in its own distinct neon color (from init.map.portals[].color) so
+// players can identify linked doorways at a glance.
 const portals3d = {};
 
 /* --- snapshot interpolation buffer ------------------------------------------ */
@@ -189,7 +192,7 @@ const MAT = {
   solid: new THREE.MeshLambertMaterial({ color: 0x39424e }),
   platform: new THREE.MeshLambertMaterial({ color: 0x2c3a55, emissive: 0x0a1226 }),
   ramp: new THREE.MeshLambertMaterial({ color: 0x333d49 }),
-  mezzBody: new THREE.MeshLambertMaterial({ color: 0x2f3947 }), // second-floor structure walls (slab below the deck)
+  mezzDeck: new THREE.MeshLambertMaterial({ color: 0x34405a, emissive: 0x101c33 }), // thin floating second-floor slab (open underneath)
   wall: new THREE.MeshLambertMaterial({ color: 0x1b222c, emissive: 0x050708 }),
   nukeDome: new THREE.MeshBasicMaterial({ color: 0xff3b30 }),
   inhibitDome: new THREE.MeshBasicMaterial({ color: 0x3ba7ff }),
@@ -298,12 +301,11 @@ function buildWorld(map) {
   });
 
   // static solids: first entry is the central platform (distinct material). The
-  // mezzanine structure footprint is skipped here — it gets its own body + deck
-  // roof rendering below so the second-floor surface reads as a distinct deck.
-  const mezz = map.mezz || null;   // [minX, maxX, minZ, maxZ, top] (top = MEZZ_TOP)
+  // second-floor deck is NOT in this list — it renders as a thin floating slab
+  // below (map.floaters) with fully open space underneath.
+  const mezz = map.mezz || null;   // [minX, maxX, minZ, maxZ, top] (top = MEZZ_TOP), used for ramp tops
   map.solids.forEach((s, i) => {
     const [minX, maxX, minZ, maxZ, top] = s;
-    if (mezz && minX === mezz[0] && maxX === mezz[1] && minZ === mezz[2] && maxZ === mezz[3]) return;
     const m = new THREE.Mesh(
       new THREE.BoxGeometry(maxX - minX, top, maxZ - minZ),
       i === 0 ? MAT.platform : MAT.solid);
@@ -311,21 +313,16 @@ function buildWorld(map) {
     scene.add(m);
   });
 
-  // open second-floor mezzanine: solid structure body from the ground up to just
-  // below the deck, plus a distinct roof slab whose TOP face sits exactly at the
-  // server's MEZZ_TOP walkable height (the matching SOLIDS entry owns collision).
-  if (mezz) {
-    const [mx0, mx1, mz0, mz1, mtop] = mezz;
-    const mcx = (mx0 + mx1) / 2, mcz = (mz0 + mz1) / 2;
-    const bodyH = mtop - 0.5;
-    const body = new THREE.Mesh(new THREE.BoxGeometry(mx1 - mx0, bodyH, mz1 - mz0), MAT.mezzBody);
-    body.position.set(mcx, bodyH / 2, mcz);
-    scene.add(body);
-    // deck roof: slight eave overhang so the open second floor reads as a slab;
-    // its top face is at exactly mtop (the server walkable height) — no z-fighting.
-    const roof = new THREE.Mesh(new THREE.BoxGeometry(mx1 - mx0 + 0.6, 0.5, mz1 - mz0 + 0.6), MAT.platform);
-    roof.position.set(mcx, mtop - 0.25, mcz);
-    scene.add(roof);
+  // floating platform slabs: thin decks (~0.5 thick) whose TOP face sits exactly
+  // at the server's walkable height — no foundation to the ground, so sightlines
+  // and movement stay fully open underneath (the matching FLOATERS entry owns
+  // collision). Slight eave overhang so each deck reads as a floating slab.
+  for (const f of map.floaters || []) {
+    const [fx0, fx1, fz0, fz1, fbot, ftop] = f;   // [minX, maxX, minZ, maxZ, bottom, top]
+    const slab = new THREE.Mesh(
+      new THREE.BoxGeometry(fx1 - fx0 + 0.6, Math.max(0.25, ftop - fbot), fz1 - fz0 + 0.6), MAT.mezzDeck);
+    slab.position.set((fx0 + fx1) / 2, (ftop + fbot) / 2, (fz0 + fz1) / 2);
+    scene.add(slab);
   }
 
   // ramp mesh helper: a sloped box whose TOP surface follows the server's
@@ -422,8 +419,11 @@ function buildWorld(map) {
   // portal field, one per registered pair end (ground flanks A/B, ground-deck
   // C/D, deck ends E/F). The server is authoritative for the actual translation —
   // this is pure presentation at the positions from init.map.portals. Each group
-  // origin sits on the doorway's own floor level (pt.y: 0 = ground, MEZZ_TOP =
-  // second-floor deck) so deck doorways stand on the rendered deck roof.
+  // origin sits on the doorway's own floor level (pt.y: 0 = ground, deck anchor
+  // embedded a hair into the thin floating slab) so deck doorways sit neatly ON
+  // top of the rendered platform deck. Every pair glows in its own distinct neon
+  // color (pt.color from the server payload — cyan A/B, emerald C/D, magenta E/F)
+  // applied to field + core + light so linked doorways are easy to identify.
   const portalList = map.portals || [];
   for (let pi = 0; pi < portalList.length; pi++) {
     const pt = portalList[pi];
@@ -444,10 +444,13 @@ function buildWorld(map) {
     threshold.position.set(0, 0.11, 0);
     group.add(threshold);
 
-    // glowing portal field: wide violet sheet + brighter inner core (additive so it
-    // reads as energy, not a wall; depthWrite off so the far side shows through)
-    const fieldMat = new THREE.MeshBasicMaterial({ color: 0xb44dff, transparent: true, opacity: 0.5, blending: THREE.AdditiveBlending, side: THREE.DoubleSide, depthWrite: false });
-    const coreMat = new THREE.MeshBasicMaterial({ color: 0xe6c8ff, transparent: true, opacity: 0.7, blending: THREE.AdditiveBlending, side: THREE.DoubleSide, depthWrite: false });
+    // glowing portal field in the PAIR's distinct neon color (fallback violet for
+    // legacy payloads without a color): wide sheet + brighter inner core (additive
+    // so it reads as energy, not a wall; depthWrite off so the far side shows through)
+    const pairColor = typeof pt.color === 'number' ? pt.color : 0xb44dff;
+    const coreColor = new THREE.Color(pairColor).lerp(new THREE.Color(0xffffff), 0.55).getHex(); // brighter inner core
+    const fieldMat = new THREE.MeshBasicMaterial({ color: pairColor, transparent: true, opacity: 0.5, blending: THREE.AdditiveBlending, side: THREE.DoubleSide, depthWrite: false });
+    const coreMat = new THREE.MeshBasicMaterial({ color: coreColor, transparent: true, opacity: 0.7, blending: THREE.AdditiveBlending, side: THREE.DoubleSide, depthWrite: false });
     const field = new THREE.Mesh(new THREE.PlaneGeometry(3.1, 3.0), fieldMat);
     field.position.set(0, 1.75, 0);
     group.add(field);
@@ -455,7 +458,7 @@ function buildWorld(map) {
     core.position.set(0, 1.7, 0.03);
     group.add(core);
 
-    const light = new THREE.PointLight(0xb44dff, 1.6, 20);
+    const light = new THREE.PointLight(pairColor, 1.6, 20);   // pair-colored glow spilling onto the floor/deck
     light.position.set(0, 2.3, 0);
     group.add(light);
 
@@ -841,6 +844,12 @@ function lgRayEnd(origin, dir, out) {
   if (worldMap) {
     for (const s of worldMap.solids) {          // [minX, maxX, minZ, maxZ, top]
       const t = lgRayBox(origin.x, origin.y, origin.z, dir.x, dir.y, dir.z, s[0], s[1], 0, s[4], s[2], s[3]);
+      if (t != null && t < tBest) tBest = t;
+    }
+    // floating platform slabs: the beam stops on their thin volume only — the open
+    // space underneath stays clear to fire through.
+    for (const f of worldMap.floaters || []) {  // [minX, maxX, minZ, maxZ, bottom, top]
+      const t = lgRayBox(origin.x, origin.y, origin.z, dir.x, dir.y, dir.z, f[0], f[1], f[4], f[5], f[2], f[3]);
       if (t != null && t < tBest) tBest = t;
     }
     // perimeter walls (visual boxes from buildWorld: 0.8 thick, 3.4 tall at ±H)
