@@ -19,7 +19,8 @@
  *  - Blast Jump Engine: grenades/rockets apply pure radial impulse vectors —
  *    direction computed from blast center to each player's position -> strong
  *    angled horizontal + vertical boosts for proper rocket / grenade jumping.
- *  - Arena map: cover blocks, elevated ramps, +25 HP packs, ammo crates.
+ *  - Arena map: cover blocks, elevated ramps, open second-floor mezzanine deck
+ *    (Y = 8.0) with two sloped access ramps, +25 HP packs, ammo crates.
  *  - Central buttons: NUKE (wipes the horde, 30 s overhead cooldown meter) and
  *    INHIBIT (disables zombie spawns for 30 s).
  *  - Zombie AI engine: continuous horde spawner with INVERSE player scaling
@@ -50,6 +51,37 @@ const PLAT_TOP = 2.0;                 // central platform height
 const RAMP_LEN = 4;                   // ramp run length (one per side)
 const RAMP_W = 5;                     // ramp half-width
 
+/* --- Second-floor mezzanine + access ramps --------------------------------- */
+// Open second floor: a solid structure in the northwest quadrant whose flat roof
+// is the walkable deck at Y = MEZZ_TOP. The deck is OPEN — no ceiling, no railings:
+// players can walk its whole perimeter and fall off any edge (the height field
+// simply drops back to ground level outside the footprint). Two sloped access
+// ramps (rise 8 over run RAMP2_LEN, ~34 deg) climb the east and south faces from
+// ground level up to the deck. The structure is a normal SOLID: resolveAxis()
+// blocks its walls for anything whose feet are below MEZZ_TOP - STEP, and
+// groundHeightAt() returns MEZZ_TOP inside the footprint so the roof is walkable.
+const MEZZ_MIN_X = -40;               // mezzanine structure footprint (XZ)
+const MEZZ_MAX_X = -22;
+const MEZZ_MIN_Z = -36;
+const MEZZ_MAX_Z = -18;
+const MEZZ_TOP = 8.0;                 // second-floor deck surface height (Y)
+const RAMP2_LEN = 12;                 // horizontal run of each access ramp
+const RAMP2_W = 4;                    // half-width of each access ramp
+// East approach: from the deck face x=MEZZ_MAX_X down to ground at x=RAMP_A_MAX_X,
+// mouth centered on z=-27 (width along the face: z in [-31, -23]).
+const RAMP_A_MIN_X = MEZZ_MAX_X;                    // -22 (deck edge, height MEZZ_TOP)
+const RAMP_A_MAX_X = MEZZ_MAX_X + RAMP2_LEN;        // -10 (ground end, height 0)
+const RAMP_A_MIN_Z = -31;
+const RAMP_A_MAX_Z = -23;
+const RAMP_A_CZ = (RAMP_A_MIN_Z + RAMP_A_MAX_Z) / 2;   // -27
+// South approach: from the deck face z=MEZZ_MAX_Z down to ground at z=RAMP_B_MAX_Z,
+// mouth centered on x=-31 (width along the face: x in [-35, -27]).
+const RAMP_B_MIN_Z = MEZZ_MAX_Z;                    // -18 (deck edge, height MEZZ_TOP)
+const RAMP_B_MAX_Z = MEZZ_MAX_Z + RAMP2_LEN;        // -6  (ground end, height 0)
+const RAMP_B_MIN_X = -35;
+const RAMP_B_MAX_X = -27;
+const RAMP_B_CX = (RAMP_B_MIN_X + RAMP_B_MAX_X) / 2;   // -31
+
 /* --- Quake/Source-style movement physics (overhauled) ----------------------- */
 const GRAVITY = 38;                   // units/s^2 (raised with the jump for a snappier arc)
 const JUMP_VEL = 11;                  // halved jump impulse -> ~1.6 u apex, ~0.58 s airtime strafe window
@@ -68,6 +100,13 @@ const PLAYER_R = 0.45;                // player collision radius
 const PLAYER_H = 1.7;                 // player collision height
 const EYE = 1.6;                      // camera height above feet
 const STEP = 0.55;                    // auto step-up height
+// Max vertical gap the landing snap will bridge in one tick. Must exceed the
+// largest per-tick fall distance (terminal -60 u/s * DT = 1.0 u) so fast falls
+// always land instead of tunneling, while staying far below tall surfaces like
+// the mezzanine ramp mouths — an entity sliding along a wall into one of those
+// mouths is BELOW an unreachable step and must hold at its lower floor instead
+// of being teleported up onto the slope.
+const SNAP_GAP_MAX = 1.25;            // u: landing-snap reach (see reachableFloorAt)
 
 /* --- Weapons ---------------------------------------------------------------- */
 const WEAPONS = [
@@ -109,11 +148,13 @@ const RESPAWN_TIME = 3;               // seconds until a dead player respawns
 const HEALTH_RESPAWN = 10;            // seconds
 const AMMO_RESPAWN = 15;              // seconds
 
-/* --- Static map solids (cover blocks + central platform) --------------------- */
+/* --- Static map solids (cover blocks, central platform, mezzanine) ----------- */
 // Arena scaled down ~25% to +/-60: every cover block / crate / side platform is
 // scaled 0.75x in X/Z from the doubled layout and redistributed across the
 // midground arena. The central platform with the NUKE/INHIBIT buttons stays at
-// its original size as the map's focal point.
+// its original size as the map's focal point. The mezzanine structure (last
+// entry) is a full-height solid like every other block: its roof at MEZZ_TOP is
+// the open second-floor deck, and its walls are impassable below MEZZ_TOP - STEP.
 const SOLIDS = [
   { minX: -PLAT_HALF, maxX: PLAT_HALF, minZ: -PLAT_HALF, maxZ: PLAT_HALF, top: PLAT_TOP }, // center platform
   { minX: -21,   maxX: -15,   minZ: -4.5, maxZ: 4.5,  top: 1.6 },   // west cover block
@@ -128,6 +169,7 @@ const SOLIDS = [
   { minX:  40.5, maxX:  45,   minZ: 40.5, maxZ: 45,   top: 1.4 },
   { minX: -36,   maxX: -27,   minZ: 9,    maxZ: 18,   top: 1.8 },   // elevated side platforms (jumpable)
   { minX:  27,   maxX:  36,   minZ: -18,  maxZ: -9,   top: 1.8 },
+  { minX: MEZZ_MIN_X, maxX: MEZZ_MAX_X, minZ: MEZZ_MIN_Z, maxZ: MEZZ_MAX_Z, top: MEZZ_TOP }, // open second-floor mezzanine (deck at Y=8)
 ];
 
 /* --- Pickups (defined after SOLIDS so groundHeightAt() can resolve tops) ----- */
@@ -200,7 +242,8 @@ const r3 = (v) => Math.round(v * 1000) / 1000;
 
 /**
  * Height of the walkable floor at (x, z): base ground, central platform top,
- * the four ramps leading to it, and the tops of any solid we stand on.
+ * the four ramps leading to it, the two mezzanine access-ramp inclines, and
+ * the tops of any solid we stand on (incl. the second-floor deck at MEZZ_TOP).
  */
 function groundHeightAt(x, z) {
   let h = 0;
@@ -215,8 +258,40 @@ function groundHeightAt(x, z) {
       h = PLAT_TOP * ((PLAT_HALF + RAMP_LEN - ax) / RAMP_LEN);
     }
   }
+  // mezzanine access-ramp inclines: linear slope from ground (0) up to MEZZ_TOP,
+  // continuous with both the deck top at the face and open floor at the ground end.
+  if (x >= RAMP_A_MIN_X && x <= RAMP_A_MAX_X && z >= RAMP_A_MIN_Z && z <= RAMP_A_MAX_Z) {
+    h = Math.max(h, MEZZ_TOP * ((RAMP_A_MAX_X - x) / RAMP2_LEN));   // 0 at ground end -> 8 at deck face
+  }
+  if (x >= RAMP_B_MIN_X && x <= RAMP_B_MAX_X && z >= RAMP_B_MIN_Z && z <= RAMP_B_MAX_Z) {
+    h = Math.max(h, MEZZ_TOP * ((RAMP_B_MAX_Z - z) / RAMP2_LEN));   // 0 at ground end -> 8 at deck face
+  }
   for (const s of SOLIDS) {
     if (x >= s.minX && x <= s.maxX && z >= s.minZ && z <= s.maxZ) h = Math.max(h, s.top);
+  }
+  return h;
+}
+
+/**
+ * Highest walkable surface within STEP reach of feet at height y: base ground
+ * plus any solid top / ramp slope no more than STEP above the feet. Used by the
+ * landing logic when an entity is BELOW a tall local surface (e.g., sliding
+ * along a wall into a mezzanine ramp mouth): it resolves their floor to the
+ * lower reachable level instead of snapping them up onto the unreachable step.
+ */
+function reachableFloorAt(x, z, y) {
+  let h = 0;                          // base ground is always walkable
+  const reach = y + STEP;
+  if (x >= RAMP_A_MIN_X && x <= RAMP_A_MAX_X && z >= RAMP_A_MIN_Z && z <= RAMP_A_MAX_Z) {
+    const rh = MEZZ_TOP * ((RAMP_A_MAX_X - x) / RAMP2_LEN);
+    if (rh <= reach) h = Math.max(h, rh);
+  }
+  if (x >= RAMP_B_MIN_X && x <= RAMP_B_MAX_X && z >= RAMP_B_MIN_Z && z <= RAMP_B_MAX_Z) {
+    const rh = MEZZ_TOP * ((RAMP_B_MAX_Z - z) / RAMP2_LEN);
+    if (rh <= reach) h = Math.max(h, rh);
+  }
+  for (const s of SOLIDS) {
+    if (x >= s.minX && x <= s.maxX && z >= s.minZ && z <= s.maxZ && s.top <= reach) h = Math.max(h, s.top);
   }
   return h;
 }
@@ -266,6 +341,10 @@ function clampToArena(ent) {
  *    horizontal speed build-up with NO hard cap (bunny hop chains).
  *  - Jump: impulse preserves all horizontal momentum; the halved JUMP_VEL
  *    (11) gives a ~1.6 u apex and a ~0.58 s airtime window for strafing each hop.
+ *  - Landing snap guard: when the feet end up BELOW a local surface taller than
+ *    SNAP_GAP_MAX above them (a tall mezzanine ramp mouth reached by sliding
+ *    along its wall), they hold at the highest reachable floor instead of being
+ *    teleported up onto the slope — see reachableFloorAt().
  */
 function updatePlayerPhysics(p, dt) {
   const inp = p.input;
@@ -324,7 +403,16 @@ function updatePlayerPhysics(p, dt) {
   p.y += p.vy * dt;
   const gh = groundHeightAt(p.x, p.z);
   if (p.y <= gh + 0.05 && p.vy <= 0) {
-    p.y = gh; p.vy = 0; p.onGround = true;   // landed / resting on floor or ramp
+    if (gh - p.y > SNAP_GAP_MAX) {
+      // Feet are below an unreachable step (tall ramp mouth / deck edge reached by
+      // sliding along the wall): hold at the highest reachable floor instead of
+      // snapping up onto the slope, and keep falling toward it if still above.
+      const low = reachableFloorAt(p.x, p.z, p.y);
+      if (p.y <= low + 0.05) { p.y = low; p.vy = 0; p.onGround = true; }   // resting on the lower floor
+      else { p.onGround = false; }                                          // falling toward it
+    } else {
+      p.y = gh; p.vy = 0; p.onGround = true;   // landed / resting on floor or ramp
+    }
   } else {
     p.onGround = false;
   }
@@ -899,11 +987,21 @@ function updateZombies(dt) {
       }
     }
 
-    // vertical: zombies are glued to the floor with simple gravity for falls
+    // vertical: zombies are glued to the floor with simple gravity for falls.
+    // Same landing-snap guard as players: below an unreachable step (a tall ramp
+    // mouth reached by sliding along its wall) they hold at the reachable lower
+    // floor instead of teleporting up onto the slope.
     z.vy -= GRAVITY * dt;
     z.y += z.vy * dt;
     const gh = groundHeightAt(z.x, z.z);
-    if (z.y <= gh && z.vy <= 0) { z.y = gh; z.vy = 0; }
+    if (z.y <= gh && z.vy <= 0) {
+      if (gh - z.y > SNAP_GAP_MAX) {
+        const low = reachableFloorAt(z.x, z.z, z.y);
+        if (z.y <= low + 0.05) { z.y = low; z.vy = 0; }   // resting on the lower floor
+      } else {
+        z.y = gh; z.vy = 0;                               // glued to floor / ramp slope
+      }
+    }
 
     // melee contact damage
     if (target) {
@@ -1050,6 +1148,15 @@ function buildInit(p) {
       arenaHalf: ARENA_HALF,
       solids: SOLIDS.map((s) => [s.minX, s.maxX, s.minZ, s.maxZ, s.top]),
       plat: [PLAT_HALF, PLAT_TOP, RAMP_LEN, RAMP_W],
+      // open second-floor mezzanine: structure footprint + deck height (the client
+      // renders the body + roof slab; collision is the matching SOLIDS entry) and
+      // its two access ramps as [xTop, zTop, xBot, zBot, halfWidth] — top point at
+      // deck face (height MEZZ_TOP), bottom point on open floor (height 0).
+      mezz: [MEZZ_MIN_X, MEZZ_MAX_X, MEZZ_MIN_Z, MEZZ_MAX_Z, MEZZ_TOP],
+      ramps2: [
+        [RAMP_A_MIN_X, RAMP_A_CZ, RAMP_A_MAX_X, RAMP_A_CZ, RAMP2_W],   // east approach
+        [RAMP_B_CX, RAMP_B_MIN_Z, RAMP_B_CX, RAMP_B_MAX_Z, RAMP2_W],   // south approach
+      ],
       buttons: BUTTONS.map((b) => ({ id: b.id, x: b.x, y: b.y, z: b.z, r: b.r })),
       portals: PORTALS.map((pt) => ({ id: pt.id, x: pt.x, z: pt.z, axis: pt.axis, dir: pt.dir })),
       pickups: PICKUPS.map((k) => [k.id, k.kind, k.x, k.y, k.z]),

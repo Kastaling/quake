@@ -2,7 +2,8 @@
  * ============================================================================
  *  game.js — Three.js client for the Quake arena // zombie siege server
  * ============================================================================
- *  - First-person renderer: retro grid arena, cover blocks, ramps, central
+ *  - First-person renderer: retro grid arena, cover blocks, ramps, open
+ *    second-floor mezzanine deck (Y=8) with its two sloped access ramps, central
  *    platform with the two interactive buttons (overhead cooldown meters),
  *    pickups, remote players and zombies.
  *  - Interpolation / extrapolation: remote entity positions are sampled from a
@@ -187,6 +188,7 @@ const MAT = {
   solid: new THREE.MeshLambertMaterial({ color: 0x39424e }),
   platform: new THREE.MeshLambertMaterial({ color: 0x2c3a55, emissive: 0x0a1226 }),
   ramp: new THREE.MeshLambertMaterial({ color: 0x333d49 }),
+  mezzBody: new THREE.MeshLambertMaterial({ color: 0x2f3947 }), // second-floor structure walls (slab below the deck)
   wall: new THREE.MeshLambertMaterial({ color: 0x1b222c, emissive: 0x050708 }),
   nukeDome: new THREE.MeshBasicMaterial({ color: 0xff3b30 }),
   inhibitDome: new THREE.MeshBasicMaterial({ color: 0x3ba7ff }),
@@ -294,9 +296,13 @@ function buildWorld(map) {
     m.position.set(x, 1.7, z); scene.add(m);
   });
 
-  // static solids: first entry is the central platform (distinct material)
+  // static solids: first entry is the central platform (distinct material). The
+  // mezzanine structure footprint is skipped here — it gets its own body + deck
+  // roof rendering below so the second-floor surface reads as a distinct deck.
+  const mezz = map.mezz || null;   // [minX, maxX, minZ, maxZ, top] (top = MEZZ_TOP)
   map.solids.forEach((s, i) => {
     const [minX, maxX, minZ, maxZ, top] = s;
+    if (mezz && minX === mezz[0] && maxX === mezz[1] && minZ === mezz[2] && maxZ === mezz[3]) return;
     const m = new THREE.Mesh(
       new THREE.BoxGeometry(maxX - minX, top, maxZ - minZ),
       i === 0 ? MAT.platform : MAT.solid);
@@ -304,11 +310,26 @@ function buildWorld(map) {
     scene.add(m);
   });
 
-  // ramps leading to the central platform (one per side), matching server slopes
-  const [PH, PT, RL, RW] = map.plat;
-  for (const d of [[0, 0, 1], [0, 0, -1], [1, 0, 0], [-1, 0, 0]]) {
-    const pTop = new THREE.Vector3(d[0] * PH, PT, d[2] * PH);
-    const pBot = new THREE.Vector3(d[0] * (PH + RL), 0, d[2] * (PH + RL));
+  // open second-floor mezzanine: solid structure body from the ground up to just
+  // below the deck, plus a distinct roof slab whose TOP face sits exactly at the
+  // server's MEZZ_TOP walkable height (the matching SOLIDS entry owns collision).
+  if (mezz) {
+    const [mx0, mx1, mz0, mz1, mtop] = mezz;
+    const mcx = (mx0 + mx1) / 2, mcz = (mz0 + mz1) / 2;
+    const bodyH = mtop - 0.5;
+    const body = new THREE.Mesh(new THREE.BoxGeometry(mx1 - mx0, bodyH, mz1 - mz0), MAT.mezzBody);
+    body.position.set(mcx, bodyH / 2, mcz);
+    scene.add(body);
+    // deck roof: slight eave overhang so the open second floor reads as a slab;
+    // its top face is at exactly mtop (the server walkable height) — no z-fighting.
+    const roof = new THREE.Mesh(new THREE.BoxGeometry(mx1 - mx0 + 0.6, 0.5, mz1 - mz0 + 0.6), MAT.platform);
+    roof.position.set(mcx, mtop - 0.25, mcz);
+    scene.add(roof);
+  }
+
+  // ramp mesh helper: a sloped box whose TOP surface follows the server's
+  // height-field slope exactly (the walkable line from pTop down to pBot).
+  const addRampMesh = (pTop, pBot, halfW) => {
     const sV = pBot.clone().sub(pTop).normalize();            // down-slope direction
     const tV = new THREE.Vector3(0, 1, 0).cross(sV).normalize(); // horizontal tangent
     let nV = tV.clone().cross(sV);                             // slope normal
@@ -316,9 +337,27 @@ function buildWorld(map) {
     const mid = pTop.clone().add(pBot).multiplyScalar(0.5).sub(nV.clone().multiplyScalar(0.15));
     const m4 = new THREE.Matrix4().makeBasis(tV, nV, sV);
     m4.setPosition(mid.x, mid.y, mid.z);
-    const ramp = new THREE.Mesh(new THREE.BoxGeometry(RW * 2, 0.3, pTop.distanceTo(pBot)), MAT.ramp);
+    const ramp = new THREE.Mesh(new THREE.BoxGeometry(halfW * 2, 0.3, pTop.distanceTo(pBot)), MAT.ramp);
     ramp.quaternion.setFromRotationMatrix(m4);
     scene.add(ramp);
+  };
+
+  // ramps leading to the central platform (one per side), matching server slopes
+  const [PH, PT, RL, RW] = map.plat;
+  for (const d of [[0, 0, 1], [0, 0, -1], [1, 0, 0], [-1, 0, 0]]) {
+    addRampMesh(
+      new THREE.Vector3(d[0] * PH, PT, d[2] * PH),
+      new THREE.Vector3(d[0] * (PH + RL), 0, d[2] * (PH + RL)),
+      RW);
+  }
+
+  // mezzanine access ramps: ground -> second-floor deck, matching the server's
+  // ramp inclines in groundHeightAt. Each entry is [xTop, zTop, xBot, zBot, halfW].
+  for (const r of map.ramps2 || []) {
+    addRampMesh(
+      new THREE.Vector3(r[0], mezz ? mezz[4] : 8, r[1]),
+      new THREE.Vector3(r[2], 0, r[3]),
+      r[4]);
   }
 
   // interactive buttons with overhead cooldown meters
