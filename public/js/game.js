@@ -1530,7 +1530,11 @@ function onEvent(e) {
       // A player just hopped through the linked pair: flash BOTH doorways (the hop is
       // server-authoritative — positions arrive via snapshots, and both the local
       // camera lerp and remote-mesh sampling snap on teleport-sized jumps) and play a
-      // positional whoosh at each end of the link.
+      // positional whoosh at each end of the link. If it was OUR hop, also rotate our
+      // own camera by the server-computed exit delta (dest.yaw - src.yaw + PI) so we
+      // emerge facing OUT of the destination portal's front face — remote players'
+      // hops must never turn our view.
+      if (me != null && e.who === me && isFiniteNum(e.dyaw)) yaw += e.dyaw;
       for (const id of Object.keys(portals3d)) {
         const pt = portals3d[id];
         pt.flash = 1;

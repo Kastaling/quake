@@ -160,14 +160,23 @@ for (let i = 0; i < 12; i++) {
 // (position + momentum vector) out of Portal B, and vice versa. Rockets and
 // grenades also travel through them (see checkProjectilePortals). `axis` is the
 // doorway's normal axis ('x' or 'z'); `dir` points from the doorway INTO the
-// arena (the exit side). The 0.5 s per-player cooldown prevents instant
-// re-trigger loops if an exit ever overlaps another trigger zone. Positions are
-// scaled 0.75x to sit on open floor inside the midground +/-60 perimeter.
+// arena — the portal's forward normal, i.e. out of its FRONT face. `yaw` is that
+// same facing in player-aim convention (forward = [-sin(yaw), 0, -cos(yaw)]);
+// hop exit transforms use (dest.yaw - src.yaw + PI) so entities emerge moving
+// forward OUT of the destination portal's front face. The 0.5 s per-player
+// cooldown prevents instant re-trigger loops if an exit ever overlaps another
+// trigger zone. Positions are scaled 0.75x to sit on open floor inside the
+// midground +/-60 perimeter.
 const PORTAL_CD = 0.5;                // seconds before a player may teleport again
 const PORTALS = [
   { id: 'A', x: -54, z: -25.5, axis: 'x', dir: 1 },   // west flank doorway, faces +X into the arena
   { id: 'B', x:  54, z:  25.5, axis: 'x', dir: -1 },  // east flank doorway, faces -X into the arena
 ];
+// Facing yaw per portal (player-aim convention), derived from axis/dir so it can
+// never drift out of sync with the forward normal used for exit positions.
+for (const pt of PORTALS) {
+  pt.yaw = pt.axis === 'x' ? (pt.dir > 0 ? -Math.PI / 2 : Math.PI / 2) : (pt.dir > 0 ? Math.PI : 0);
+}
 const PORTAL_PAIR = { A: 'B', B: 'A' };
 
 /* ============================== WORLD STATE ================================= */
@@ -324,12 +333,38 @@ function updatePlayerPhysics(p, dt) {
 /* ============================== PORTAL TELEPORTERS ========================== */
 
 /**
+ * Exit point for a portal hop: in FRONT of the destination portal's face, along
+ * its forward normal — destination portal pos + forward vector * clearance
+ * offset. The 1.5 u clearance sits just outside the |along| < 1.3 trigger zone,
+ * so an exiting entity never immediately re-triggers its own exit doorway.
+ */
+const PORTAL_EXIT_CLEARANCE = 1.5;   // units in front of the destination face
+function portalExitPos(exit) {
+  const ex = exit.axis === 'x' ? exit.x + exit.dir * PORTAL_EXIT_CLEARANCE : exit.x;
+  const ez = exit.axis === 'z' ? exit.z + exit.dir * PORTAL_EXIT_CLEARANCE : exit.z;
+  return [ex, ez];
+}
+
+/**
+ * Rotate a horizontal (vx, vz) vector by `ang` around world Y in the player-yaw
+ * convention (forward at yaw t is [-sin(t), 0, -cos(t)]). A pure rotation: speed
+ * magnitude is preserved exactly.
+ */
+function rotYaw(vx, vz, ang) {
+  const c = Math.cos(ang), s = Math.sin(ang);
+  return [vx * c + vz * s, -vx * s + vz * c];
+}
+
+/**
  * Linked Quake-style portal doors: if the player's feet are inside a doorway
  * trigger zone (and their per-player cooldown has elapsed), instantly translate
- * them out of the paired portal. The translation is pure — position offset and
- * the full momentum vector (vx, vy, vz) carry through unchanged, so bhop /
- * blast-jump velocity survives the hop. A 0.5 s cooldown then blocks any
- * re-trigger while the player settles on the far side.
+ * them in front of the paired portal's face. Exit position is destination pos +
+ * forward normal * clearance offset; the momentum vector (vx, vy, vz) and the
+ * player yaw angle are both rotated by (dest.yaw - src.yaw + PI) around world Y,
+ * so the player emerges moving forward OUT of the exit portal's front face with
+ * bhop / blast-jump speed intact. The same delta rides the 'portal' event out to
+ * the client, which applies it to its own camera yaw (server stays authoritative).
+ * A 0.5 s cooldown then blocks any re-trigger while the player settles on the far side.
  */
 function checkPortals(p) {
   if (p.portalCd > 0) return;
@@ -338,43 +373,33 @@ function checkPortals(p) {
     const across = pt.axis === 'x' ? p.z - pt.z : p.x - pt.x;  // offset across the doorway width
     if (Math.abs(along) < 1.3 && Math.abs(across) < 1.7) {
       const exit = PORTALS.find((q) => q.id === PORTAL_PAIR[pt.id]);
-      const ex = exit.axis === 'x' ? exit.x + exit.dir * 1.5 : exit.x; // just inside the far doorway
-      const ez = exit.axis === 'z' ? exit.z + exit.dir * 1.5 : exit.z;
+      const dyaw = exit.yaw - pt.yaw + Math.PI;   // exit-direction transform (Y rotation)
+      const [ex, ez] = portalExitPos(exit);       // in front of the destination face
       // preserve height above local ground so mid-air entries land at matching altitude
       const hAbove = Math.max(0, p.y - groundHeightAt(p.x, p.z));
       p.x = ex; p.z = ez;
       p.y = groundHeightAt(ex, ez) + hAbove;
-      // momentum vector (vx, vy, vz) is intentionally left untouched: pure translation
+      // rotate momentum (horizontal only — vy carries through) and the player's yaw
+      // angle by the same delta so facing and velocity stay aligned out of the face
+      const [nvx, nvz] = rotYaw(p.vx, p.vz, dyaw);
+      p.vx = nvx; p.vz = nvz;
+      p.input.yaw += dyaw;
       checkGround(p);
       p.portalCd = PORTAL_CD;
-      emitEvent({ t: 'portal', p: pt.id });   // client flashes both doorways + whoosh
+      emitEvent({ t: 'portal', p: pt.id, who: p.id, dyaw });   // client flashes + rotates its own camera
       return;
     }
   }
 }
 
 /**
- * Orthonormal local frame for a doorway: `n` points INTO the arena along the
- * portal's facing direction, `u` is world up, and `s` spans the doorway plane.
- * Used to re-orient projectile velocity when it hops between linked portals —
- * an orthonormal basis change preserves speed exactly.
- */
-function portalBasis(pt) {
-  const nx = pt.axis === 'x' ? pt.dir : 0;
-  const nz = pt.axis === 'z' ? pt.dir : 0;
-  // side = cross(up, normal), normalized (up = world Y, normal has no y component)
-  let sx = nz, sy = 0, sz = -nx;
-  const sl = Math.hypot(sx, sy, sz) || 1;
-  return { n: [nx, 0, nz], u: [0, 1, 0], s: [sx / sl, sy / sl, sz / sl] };
-}
-
-/**
  * Linked-portal travel for ROCKETS and GRENADES. If a projectile's position falls
  * inside an active doorway trigger zone (same bounds as the player doors), it is
- * translated to the paired portal's exit point and its velocity vector is
- * re-oriented relative to the EXIT portal's facing direction: the through-
- * component now aligns with that portal's `dir` while the full speed magnitude is
- * preserved. A short per-projectile cooldown blocks any instant re-trigger at the
+ * translated in front of the paired portal's face (destination pos + forward
+ * normal * clearance offset) and its velocity vector is rotated around world Y by
+ * (dest.yaw - src.yaw + PI): a pure rotation that preserves speed exactly while
+ * re-aiming the projectile so it emerges moving forward OUT of the exit portal's
+ * front face. A short per-projectile cooldown blocks any instant re-trigger at the
  * exit doorway. Nails never reach this path (they run stepNail and skip portal
  * processing entirely — a deliberate server-performance optimization). Updated
  * positions ride the next 30 Hz snapshot out to every connected client.
@@ -386,19 +411,13 @@ function checkProjectilePortals(pr) {
     const across = pt.axis === 'x' ? pr.z - pt.z : pr.x - pt.x;  // offset across the doorway width
     if (Math.abs(along) < 1.3 && Math.abs(across) < 1.7) {
       const exit = PORTALS.find((q) => q.id === PORTAL_PAIR[pt.id]);
-      const ex = exit.axis === 'x' ? exit.x + exit.dir * 1.5 : exit.x; // just inside the far doorway
-      const ez = exit.axis === 'z' ? exit.z + exit.dir * 1.5 : exit.z;
+      const dyaw = exit.yaw - pt.yaw + Math.PI;   // exit-direction transform (Y rotation)
+      const [ex, ez] = portalExitPos(exit);       // in front of the destination face
 
-      // re-orient velocity: decompose in the entry portal's frame, reconstruct in
-      // the exit portal's frame (orthonormal -> speed preserved exactly)
-      const bi = portalBasis(pt);
-      const bo = portalBasis(exit);
-      const vnIn = pr.vx * bi.n[0] + pr.vy * bi.n[1] + pr.vz * bi.n[2];
-      const vuIn = pr.vx * bi.u[0] + pr.vy * bi.u[1] + pr.vz * bi.u[2];
-      const vsIn = pr.vx * bi.s[0] + pr.vy * bi.s[1] + pr.vz * bi.s[2];
-      pr.vx = vnIn * bo.n[0] + vuIn * bo.u[0] + vsIn * bo.s[0];
-      pr.vy = vnIn * bo.n[1] + vuIn * bo.u[1] + vsIn * bo.s[1];
-      pr.vz = vnIn * bo.n[2] + vuIn * bo.u[2] + vsIn * bo.s[2];
+      // rotate velocity by the same delta as players: horizontal components only —
+      // vy carries through untouched and speed magnitude is preserved exactly
+      const [nvx, nvz] = rotYaw(pr.vx, pr.vz, dyaw);
+      pr.vx = nvx; pr.vz = nvz;
 
       // preserve height above local ground so mid-air entries land at matching altitude
       const hAbove = Math.max(0, pr.y - groundHeightAt(pr.x, pr.z));
@@ -651,9 +670,9 @@ function updateProjectiles(dt) {
 
     // linked-portal travel (rockets/grenades only — nails take the stepNail path
     // above and skip this entirely for server performance): entering a doorway
-    // trigger translates to the paired portal's exit and re-orients velocity
-    // relative to that portal's facing while preserving speed. The new position
-    // syncs to all clients via the next 30 Hz snapshot.
+    // trigger translates in front of the paired portal's face and rotates velocity
+    // by (dest.yaw - src.yaw + PI) so it emerges moving out of that portal's front
+    // face with speed preserved. The new position syncs via the next 30 Hz snapshot.
     if (pr.portalCd > 0) pr.portalCd = Math.max(0, pr.portalCd - dt);
     checkProjectilePortals(pr);
 
