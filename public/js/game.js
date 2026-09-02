@@ -2,11 +2,12 @@
  * ============================================================================
  *  game.js — Three.js client for the Quake arena // zombie siege server
  * ============================================================================
- *  - First-person renderer: retro grid arena, cover blocks, ramps, thin floating
- *    second-floor platform slab (deck at Y=8, open underneath) with its two sloped
- *    access ramps, central platform with the two interactive buttons (overhead
- *    cooldown meters), pickups, remote players and zombies. Portals glow in a
- *    distinct neon color per pair so linked doorways are easy to identify.
+ *  - First-person renderer: retro grid arena, cover blocks, ramps, triangular
+ *    highground — three thin floating deck nodes (21x21, top at Y=8, open
+ *    underneath) linked by elevated walkways with one sloped access ramp per
+ *    node, central platform with the two interactive buttons (overhead cooldown
+ *    meters), pickups, remote players and zombies. Portals glow in a distinct
+ *    neon color per pair so linked doorways are easy to identify.
  *  - Interpolation / extrapolation: remote entity positions are sampled from a
  *    ring buffer of server snapshots at a render delay (120 ms) with capped
  *    velocity extrapolation when data runs out. The local player camera is fully
@@ -82,8 +83,9 @@ const zombies3d = new Map();   // id -> { group, typeIdx }
 const projectiles3d = new Map();// id -> { mesh, trail, kind }
 const pickups3d = new Map();   // id -> { group, baseY }
 let button3d = {};             // 'nuke' | 'inhibit' -> { group, fill, dome, light, label }
-// Linked portal teleporters (pairs A<->B ground flanks, C<->D ground/deck, E<->F deck ends):
-// id -> { group, field, core, light, phase, flash, x, y, z } (y = doorway floor level).
+// Linked portal teleporters (pairs A<->B ground flanks, C<->D ground/N1 node,
+// E<->F inter-node N2<->N3): id -> { group, field, core, light, phase, flash, x, y, z }
+// (y = doorway floor level).
 // Each pair glows in its own distinct neon color (from init.map.portals[].color) so
 // players can identify linked doorways at a glance.
 const portals3d = {};
@@ -192,7 +194,7 @@ const MAT = {
   solid: new THREE.MeshLambertMaterial({ color: 0x39424e }),
   platform: new THREE.MeshLambertMaterial({ color: 0x2c3a55, emissive: 0x0a1226 }),
   ramp: new THREE.MeshLambertMaterial({ color: 0x333d49 }),
-  mezzDeck: new THREE.MeshLambertMaterial({ color: 0x34405a, emissive: 0x101c33 }), // thin floating second-floor slab (open underneath)
+  mezzDeck: new THREE.MeshLambertMaterial({ color: 0x34405a, emissive: 0x101c33 }), // thin floating highground deck node / walkway slab (open underneath)
   wall: new THREE.MeshLambertMaterial({ color: 0x1b222c, emissive: 0x050708 }),
   nukeDome: new THREE.MeshBasicMaterial({ color: 0xff3b30 }),
   inhibitDome: new THREE.MeshBasicMaterial({ color: 0x3ba7ff }),
@@ -301,9 +303,8 @@ function buildWorld(map) {
   });
 
   // static solids: first entry is the central platform (distinct material). The
-  // second-floor deck is NOT in this list — it renders as a thin floating slab
-  // below (map.floaters) with fully open space underneath.
-  const mezz = map.mezz || null;   // [minX, maxX, minZ, maxZ, top] (top = MEZZ_TOP), used for ramp tops
+  // highground deck nodes are NOT in this list — they render as thin floating
+  // slabs below (map.floaters) with fully open space underneath.
   map.solids.forEach((s, i) => {
     const [minX, maxX, minZ, maxZ, top] = s;
     const m = new THREE.Mesh(
@@ -313,16 +314,30 @@ function buildWorld(map) {
     scene.add(m);
   });
 
-  // floating platform slabs: thin decks (~0.5 thick) whose TOP face sits exactly
-  // at the server's walkable height — no foundation to the ground, so sightlines
-  // and movement stay fully open underneath (the matching FLOATERS entry owns
-  // collision). Slight eave overhang so each deck reads as a floating slab.
+  // floating platform slabs: the three triangular highground deck nodes — thin
+  // decks (~0.5 thick) whose TOP face sits exactly at the server's walkable
+  // height, no foundation to the ground, so sightlines and movement stay fully
+  // open underneath (the matching FLOATERS entry owns collision). Slight eave
+  // overhang so each deck reads as a floating slab.
   for (const f of map.floaters || []) {
     const [fx0, fx1, fz0, fz1, fbot, ftop] = f;   // [minX, maxX, minZ, maxZ, bottom, top]
     const slab = new THREE.Mesh(
       new THREE.BoxGeometry(fx1 - fx0 + 0.6, Math.max(0.25, ftop - fbot), fz1 - fz0 + 0.6), MAT.mezzDeck);
     slab.position.set((fx0 + fx1) / 2, (ftop + fbot) / 2, (fz0 + fz1) / 2);
     scene.add(slab);
+  }
+
+  // elevated walkways between the deck nodes: rotated thin slabs at deck level
+  // (same material as the node decks), matching the server's WALKWAYS footprints.
+  // Each entry is [cx, cz, len, width, angle, bottom, top]; three.js rotation.y
+  // maps local +X to world (cos a, 0, -sin a), so negate the server's angle.
+  for (const wk of map.walkways || []) {
+    const [wx, wz, wl, ww, wang, wbot, wtop] = wk;
+    const bridge = new THREE.Mesh(
+      new THREE.BoxGeometry(wl + 0.6, Math.max(0.25, wtop - wbot), ww + 0.6), MAT.mezzDeck);
+    bridge.position.set(wx, (wtop + wbot) / 2, wz);
+    bridge.rotation.y = -wang;
+    scene.add(bridge);
   }
 
   // ramp mesh helper: a sloped box whose TOP surface follows the server's
@@ -349,11 +364,11 @@ function buildWorld(map) {
       RW);
   }
 
-  // mezzanine access ramps: ground -> second-floor deck, matching the server's
-  // ramp inclines in groundHeightAt. Each entry is [xTop, zTop, xBot, zBot, halfW].
+  // deck-node access ramps: ground -> upper node surface, matching the server's
+  // ramp inclines in groundHeightAt. Each entry is [xTop, zTop, xBot, zBot, halfW, topY].
   for (const r of map.ramps2 || []) {
     addRampMesh(
-      new THREE.Vector3(r[0], mezz ? mezz[4] : 8, r[1]),
+      new THREE.Vector3(r[0], r.length > 5 ? r[5] : 8, r[1]),
       new THREE.Vector3(r[2], 0, r[3]),
       r[4]);
   }
@@ -850,6 +865,17 @@ function lgRayEnd(origin, dir, out) {
     // space underneath stays clear to fire through.
     for (const f of worldMap.floaters || []) {  // [minX, maxX, minZ, maxZ, bottom, top]
       const t = lgRayBox(origin.x, origin.y, origin.z, dir.x, dir.y, dir.z, f[0], f[1], f[4], f[5], f[2], f[3]);
+      if (t != null && t < tBest) tBest = t;
+    }
+    // elevated walkways: the beam stops on their thin rotated volume only — the ray
+    // is transformed into each walkway's local frame for an exact AABB test.
+    for (const wk of worldMap.walkways || []) {  // [cx, cz, len, width, angle, bottom, top]
+      const c = Math.cos(wk[4]), s = Math.sin(wk[4]);
+      const ox2 = (origin.x - wk[0]) * c + (origin.z - wk[1]) * s;
+      const oz2 = -(origin.x - wk[0]) * s + (origin.z - wk[1]) * c;
+      const dx2 = dir.x * c + dir.z * s;
+      const dz2 = -dir.x * s + dir.z * c;
+      const t = lgRayBox(ox2, origin.y, oz2, dx2, dir.y, dz2, -wk[2] / 2, wk[2] / 2, wk[5], wk[6], -wk[3] / 2, wk[3] / 2);
       if (t != null && t < tBest) tBest = t;
     }
     // perimeter walls (visual boxes from buildWorld: 0.8 thick, 3.4 tall at ±H)
